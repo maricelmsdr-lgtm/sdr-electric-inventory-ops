@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+body {
+  background-color: #020617;
+}
+
+.f-display { font-family: 'Barlow Condensed', sans-serif; letter-spacing: 0.01em; }
+.f-body { font-family: 'Inter', sans-serif; }
+.f-mono { font-family: 'IBM Plex Mono', monospace; }
+
+.bp-grid {
+  background-image:
+    linear-gradient(rgba(56,189,248,0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56,189,248,0.06) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+.rivet::before { content:''; position:absolute; top:8px; left:8px; width:5px; height:5px; border-radius:9999px; background:rgba(255,255,255,0.12); }
+.rivet::after { content:''; position:absolute; top:8px; right:8px; width:5px; height:5px; border-radius:9999px; background:rgba(255,255,255,0.12); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: #0f172a; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
