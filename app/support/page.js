@@ -1,87 +1,47 @@
+export const metadata = {
+  title: "Support | SDR Electric - Inventory Ops",
+  description: "Support for SDR Electric - Inventory Ops",
+};
+
 export default function SupportPage() {
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        background: "#070a14",
-        color: "#e2e8f0",
-        padding: "24px",
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: 500,
-          width: "100%",
-          background: "#111827",
-          borderRadius: 16,
-          padding: 40,
-          textAlign: "center",
-          boxShadow: "0 15px 40px rgba(0,0,0,.35)",
-        }}
-      >
-        <div
-          style={{
-            width: 70,
-            height: 70,
-            margin: "0 auto 20px",
-            background: "#f97316",
-            borderRadius: 14,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 34,
-          }}
-        >
-          ⚡
+    <main className="min-h-screen bg-slate-950 text-white flex items-center justify-center px-6 py-16">
+      <div className="max-w-3xl w-full bg-slate-900 rounded-2xl border border-slate-800 shadow-xl p-10">
+        <h1 className="text-4xl font-bold text-orange-500 mb-4">
+          SDR Electric – Inventory Ops
+        </h1>
+
+        <p className="text-slate-300 leading-7">
+          Welcome to the official support page for
+          <strong> SDR Electric – Inventory Ops</strong>.
+        </p>
+
+        <p className="mt-6 text-slate-300 leading-7">
+          Inventory Ops is a cloud-based inventory and warehouse management
+          platform built for service businesses to manage inventory, warehouses,
+          purchasing, fleet inventory, field requests, and reporting.
+        </p>
+
+        <div className="mt-10">
+          <h2 className="text-2xl font-semibold text-orange-400 mb-3">
+            Contact Support
+          </h2>
+
+          <p className="text-slate-300">
+            For application or ServiceM8 support:
+          </p>
+
+          <a
+            href="mailto:mallari2312@gmail.com"
+            className="inline-block mt-4 text-sky-400 hover:text-sky-300"
+          >
+            📧 mallari2312@gmail.com
+          </a>
         </div>
 
-        <h1>SDR Electric — Inventory Ops</h1>
-
-        <p
-          style={{
-            color: "#94a3b8",
-            lineHeight: 1.7,
-          }}
-        >
-          Support for the SDR Electric ServiceM8 Integration.
-        </p>
-
-        <p>
-          Need assistance?
-          <br />
-          Contact us anytime.
-        </p>
-
-        <a
-          href="mailto:mallari2312@gmail.com"
-          style={{
-            color: "#f97316",
-            fontWeight: "bold",
-            textDecoration: "none",
-          }}
-        >
-          mallari2312@gmail.com
-        </a>
-
-        <hr
-          style={{
-            margin: "30px 0",
-            borderColor: "#1f2937",
-          }}
-        />
-
-        <p
-          style={{
-            color: "#64748b",
-            fontSize: 14,
-          }}
-        >
-          © 2026 SDR Electric
-        </p>
+        <div className="mt-10 pt-6 border-t border-slate-700 text-sm text-slate-500">
+          © 2026 SDR Electric. All rights reserved.
+        </div>
       </div>
     </main>
   );
