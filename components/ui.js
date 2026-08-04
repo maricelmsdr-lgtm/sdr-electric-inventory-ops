@@ -75,6 +75,33 @@ export function Td({ children, className = "", ...rest }) {
   return <td className={`px-3 py-2.5 text-sm text-slate-200 ${className}`} {...rest}>{children}</td>;
 }
 
+export function Gauge({ value, max, label, sub, color = "#ea580c" }) {
+  const pct = Math.max(0, Math.min(1, value / (max || 1)));
+  const angle = -90 + pct * 180;
+  const r = 42, cx = 50, cy = 50;
+  const arc = (start, end) => {
+    const s = (Math.PI * start) / 180, e = (Math.PI * end) / 180;
+    const x1 = cx + r * Math.cos(s), y1 = cy + r * Math.sin(s);
+    const x2 = cx + r * Math.cos(e), y2 = cy + r * Math.sin(e);
+    return `M ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2}`;
+  };
+  return (
+    <div className="flex flex-col items-center">
+      <svg viewBox="0 0 100 62" className="w-32 h-auto">
+        <path d={arc(180, 360)} fill="none" stroke="#1e293b" strokeWidth="8" strokeLinecap="round" />
+        <path d={arc(180, 180 + pct * 180)} fill="none" stroke={color} strokeWidth="8" strokeLinecap="round" />
+        <line x1={cx} y1={cy} x2={cx + 30 * Math.cos((Math.PI * angle) / 180)} y2={cy + 30 * Math.sin((Math.PI * angle) / 180)} stroke="#e2e8f0" strokeWidth="2" strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r="3" fill="#e2e8f0" />
+      </svg>
+      <div className="text-center -mt-1">
+        <div className="f-display text-2xl text-slate-100 leading-none">{value}</div>
+        <div className="text-[10px] f-mono uppercase text-slate-500">{label}</div>
+        {sub && <div className="text-[10px] text-slate-600">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
 export function SearchInput({ value, onChange, placeholder }) {
   return (
     <div className="relative">

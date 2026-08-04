@@ -4,7 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   Zap, LayoutDashboard, Briefcase, Package, Truck, Warehouse, ShoppingCart,
   ArrowLeftRight, ClipboardList, SlidersHorizontal, ListChecks,
-  PackagePlus, History, LogOut,
+  PackagePlus, History, LogOut, BarChart3, ScanLine, Plug,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -20,6 +20,9 @@ const NAV_ITEMS = [
   { href: "/stock-adjustments", label: "Adjust", icon: SlidersHorizontal },
   { href: "/cycle-counts", label: "Cycle Count", icon: ListChecks },
   { href: "/stock-in", label: "Stock In", icon: PackagePlus },
+  { href: "/reports", label: "Reports", icon: BarChart3 },
+  { href: "/scanner", label: "Scanner", icon: ScanLine },
+  { href: "/integrations", label: "Integrations", icon: Plug },
   { href: "/activity", label: "Activity", icon: History },
 ];
 
