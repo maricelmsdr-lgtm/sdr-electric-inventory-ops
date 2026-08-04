@@ -102,13 +102,19 @@ export default function StockInPage() {
   const remove = async () => {
     const s = confirmDelete;
     setError("");
-    try {
-      { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: s.part_id, p_location_id: s.location_id, p_delta: -Number(s.qty) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-      const { error: delErr } = await supabase.from("stock_ins").delete().eq("id", s.id);
-      if (delErr) throw delErr;
-      await logActivity(`Deleted stock-in for ${partById(s.part_id)?.part_no || ""}`);
-    } catch (e) {
-      setError(e.message || "Something went wrong deleting the receipt.");
+    const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: s.part_id, p_location_id: s.location_id, p_delta: -Number(s.qty) });
+    const { error: delErr } = await supabase.from("stock_ins").delete().eq("id", s.id);
+    if (delErr) {
+      setError(delErr.message || "Something went wrong deleting the receipt.");
+    } else {
+      await logActivity(
+        rpcErr
+          ? `Deleted stock-in for ${partById(s.part_id)?.part_no || ""} (stock quantity could not be auto-reversed — check inventory manually)`
+          : `Deleted stock-in for ${partById(s.part_id)?.part_no || ""}`
+      );
+      if (rpcErr) {
+        setError("Receipt deleted, but the stock quantity couldn't be auto-reversed (it may already be out of sync). Double-check that part's quantity.");
+      }
     }
     setConfirmDelete(null);
     fetchAll();

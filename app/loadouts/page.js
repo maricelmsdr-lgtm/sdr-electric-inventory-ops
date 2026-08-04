@@ -191,16 +191,29 @@ export default function LoadoutsPage() {
   const remove = async () => {
     const l = confirmDelete;
     setError("");
-    try {
-      for (const li of l.loadout_line_items || []) {
-        if (l.from_location_id) { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: li.part_id, p_location_id: l.from_location_id, p_delta: Number(li.qty) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-        if (l.to_location_id) { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: li.part_id, p_location_id: l.to_location_id, p_delta: -Number(li.qty) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
+    let reversalIssue = false;
+    for (const li of l.loadout_line_items || []) {
+      if (l.from_location_id) {
+        const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: li.part_id, p_location_id: l.from_location_id, p_delta: Number(li.qty) });
+        if (rpcErr) reversalIssue = true;
       }
-      const { error: delErr } = await supabase.from("truck_loadouts").delete().eq("id", l.id);
-      if (delErr) throw delErr;
-      await logActivity(`Deleted truck load-out for ${truckById(l.truck_id)?.truck_number || ""}`);
-    } catch (e) {
-      setError(e.message || "Something went wrong deleting the load-out.");
+      if (l.to_location_id) {
+        const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: li.part_id, p_location_id: l.to_location_id, p_delta: -Number(li.qty) });
+        if (rpcErr) reversalIssue = true;
+      }
+    }
+    const { error: delErr } = await supabase.from("truck_loadouts").delete().eq("id", l.id);
+    if (delErr) {
+      setError(delErr.message || "Something went wrong deleting the load-out.");
+    } else {
+      await logActivity(
+        reversalIssue
+          ? `Deleted truck load-out for ${truckById(l.truck_id)?.truck_number || ""} (stock quantities could not be auto-reversed — check inventory manually)`
+          : `Deleted truck load-out for ${truckById(l.truck_id)?.truck_number || ""}`
+      );
+      if (reversalIssue) {
+        setError("Load-out deleted, but stock quantities couldn't be auto-reversed (they may already be out of sync). Double-check the affected part quantities.");
+      }
     }
     setConfirmDelete(null);
     fetchAll();

@@ -103,13 +103,19 @@ export default function StockAdjustmentsPage() {
   const remove = async () => {
     const a = confirmDelete;
     setError("");
-    try {
-      { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: a.part_id, p_location_id: a.location_id, p_delta: -Number(a.qty_change) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-      const { error: delErr } = await supabase.from("stock_adjustments").delete().eq("id", a.id);
-      if (delErr) throw delErr;
-      await logActivity(`Deleted stock adjustment on ${partById(a.part_id)?.part_no || ""}`);
-    } catch (e) {
-      setError(e.message || "Something went wrong deleting the adjustment.");
+    const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: a.part_id, p_location_id: a.location_id, p_delta: -Number(a.qty_change) });
+    const { error: delErr } = await supabase.from("stock_adjustments").delete().eq("id", a.id);
+    if (delErr) {
+      setError(delErr.message || "Something went wrong deleting the adjustment.");
+    } else {
+      await logActivity(
+        rpcErr
+          ? `Deleted stock adjustment on ${partById(a.part_id)?.part_no || ""} (stock quantity could not be auto-reversed — check inventory manually)`
+          : `Deleted stock adjustment on ${partById(a.part_id)?.part_no || ""}`
+      );
+      if (rpcErr) {
+        setError("Adjustment deleted, but the stock quantity couldn't be auto-reversed (it may already be out of sync). Double-check that part's quantity.");
+      }
     }
     setConfirmDelete(null);
     fetchAll();
