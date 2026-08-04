@@ -121,17 +121,16 @@ export default function PartsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav
-        right={
-          lowStock.length > 0 && (
-            <div className="hidden sm:flex items-center gap-1.5 text-[11px] f-mono text-red-400 bg-red-500/10 border border-red-500/30 px-2.5 py-1.5 rounded">
-              <AlertTriangle size={12} /> {lowStock.length} LOW STOCK
-            </div>
-          )
-        }
-      />
-
+    <Nav
+      title="Parts Catalog"
+      right={
+        lowStock.length > 0 && (
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] f-mono text-red-400 bg-red-500/10 border border-red-500/30 px-2.5 py-1.5 rounded">
+            <AlertTriangle size={12} /> {lowStock.length} LOW STOCK
+          </div>
+        )
+      }
+    >
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search part no, SKU, location..." />
@@ -253,6 +252,6 @@ export default function PartsPage() {
           onConfirm={remove}
         />
       )}
-    </div>
+    </Nav>
   );
 }

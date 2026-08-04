@@ -215,8 +215,7 @@ export default function LoadoutsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Truck Load Out">
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search truck, direction, job ref..." />
@@ -268,7 +267,7 @@ export default function LoadoutsPage() {
       {confirmDelete && (
         <ConfirmModal title="Delete Load Out" message="Delete this load-out record? The stock transfer will be reversed. This can't be undone." onCancel={() => setConfirmDelete(null)} onConfirm={remove} />
       )}
-    </div>
+    </Nav>
   );
 }
 

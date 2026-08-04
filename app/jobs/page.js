@@ -249,9 +249,7 @@ export default function JobsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
-
+    <Nav title="Jobs">
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search job, client, address..." />
@@ -332,7 +330,7 @@ export default function JobsPage() {
           onConfirm={remove}
         />
       )}
-    </div>
+    </Nav>
   );
 }
 

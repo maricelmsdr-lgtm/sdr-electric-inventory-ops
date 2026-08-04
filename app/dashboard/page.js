@@ -81,8 +81,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Dashboard">
       <div className="p-4 md:p-6 space-y-6">
         {error && <div className="text-sm text-red-400">{error}</div>}
         {loading ? (
@@ -165,6 +164,6 @@ export default function DashboardPage() {
           </>
         )}
       </div>
-    </div>
+    </Nav>
   );
 }

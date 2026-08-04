@@ -59,8 +59,7 @@ export default function ReportsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Reports">
       <div className="p-4 md:p-6 space-y-4">
         {error && <div className="text-sm text-red-400">{error}</div>}
         {loading ? (
@@ -130,6 +129,6 @@ export default function ReportsPage() {
           </>
         )}
       </div>
-    </div>
+    </Nav>
   );
 }

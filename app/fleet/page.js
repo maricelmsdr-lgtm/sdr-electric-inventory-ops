@@ -114,17 +114,16 @@ export default function FleetPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav
-        right={
-          inShop.length > 0 && (
-            <div className="hidden sm:flex items-center gap-1.5 text-[11px] f-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1.5 rounded">
-              {inShop.length} IN SHOP
-            </div>
-          )
-        }
-      />
-
+    <Nav
+      title="Fleet"
+      right={
+        inShop.length > 0 && (
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] f-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2.5 py-1.5 rounded">
+            {inShop.length} IN SHOP
+          </div>
+        )
+      }
+    >
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search truck no, nickname, driver..." />
@@ -209,6 +208,6 @@ export default function FleetPage() {
           onConfirm={remove}
         />
       )}
-    </div>
+    </Nav>
   );
 }

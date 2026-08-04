@@ -109,8 +109,7 @@ export default function CycleCountsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Cycle Counts">
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search part, location, counted by..." />
@@ -193,6 +192,6 @@ export default function CycleCountsPage() {
       {confirmDelete && (
         <ConfirmModal title="Delete Cycle Count" message="Delete this cycle count record? This can't be undone." onCancel={() => setConfirmDelete(null)} onConfirm={remove} />
       )}
-    </div>
+    </Nav>
   );
 }

@@ -74,8 +74,7 @@ export default function IntegrationsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Integrations">
       <div className="p-4 md:p-6">
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         {loading ? (
@@ -110,6 +109,6 @@ export default function IntegrationsPage() {
           </div>
         )}
       </div>
-    </div>
+    </Nav>
   );
 }

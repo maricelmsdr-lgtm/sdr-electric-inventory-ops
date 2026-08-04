@@ -123,8 +123,7 @@ export default function StockInPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Stock In">
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search part, vendor, PO ref..." />
@@ -190,6 +189,6 @@ export default function StockInPage() {
       {confirmDelete && (
         <ConfirmModal title="Delete Receipt" message="Delete this stock-in record? The quantity received will be reversed at its location. This can't be undone." onCancel={() => setConfirmDelete(null)} onConfirm={remove} />
       )}
-    </div>
+    </Nav>
   );
 }

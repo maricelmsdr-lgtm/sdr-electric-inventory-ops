@@ -62,8 +62,7 @@ export default function ScannerPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Barcode Scanner">
       <div className="p-4 md:p-6">
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -128,6 +127,6 @@ export default function ScannerPage() {
           </Panel>
         </div>
       </div>
-    </div>
+    </Nav>
   );
 }

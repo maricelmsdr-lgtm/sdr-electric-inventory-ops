@@ -109,8 +109,7 @@ export default function FieldRequestsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 f-body">
-      <Nav />
+    <Nav title="Field Requests">
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search requester, truck, part..." />
@@ -185,6 +184,6 @@ export default function FieldRequestsPage() {
       {confirmDelete && (
         <ConfirmModal title="Delete Field Request" message={`Delete this request from "${confirmDelete.requested_by}"? This can't be undone.`} onCancel={() => setConfirmDelete(null)} onConfirm={remove} />
       )}
-    </div>
+    </Nav>
   );
 }
