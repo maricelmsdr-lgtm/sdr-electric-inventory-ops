@@ -1,25 +1,48 @@
 "use client";
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
 import { Badge } from "@/components/ui";
 
 const PROVIDERS = [
-  { key: "qbo", name: "QuickBooks Online", blurb: "Sync parts costs, POs, and job invoices to your books.", color: "text-emerald-400", border: "border-emerald-400/30" },
-  { key: "servicem8", name: "ServiceM8", blurb: "Pull job details and push parts usage back to jobs.", color: "text-sky-400", border: "border-sky-400/30" },
-  { key: "housecallpro", name: "Housecall Pro", blurb: "Match dispatched jobs to parts consumption automatically.", color: "text-violet-400", border: "border-violet-400/30" },
-  { key: "ghl", name: "GoHighLevel", blurb: "Trigger reorder & low-stock alerts into your automations.", color: "text-amber-400", border: "border-amber-400/30" },
+  { key: "qbo", name: "QuickBooks Online", blurb: "Sync parts costs, POs, and job invoices to your books.", color: "text-emerald-400", border: "border-emerald-400/30", live: false },
+  { key: "servicem8", name: "ServiceM8", blurb: "Pull job details and push parts usage back to jobs.", color: "text-sky-400", border: "border-sky-400/30", live: true },
+  { key: "housecallpro", name: "Housecall Pro", blurb: "Match dispatched jobs to parts consumption automatically.", color: "text-violet-400", border: "border-violet-400/30", live: false },
+  { key: "ghl", name: "GoHighLevel", blurb: "Trigger reorder & low-stock alerts into your automations.", color: "text-amber-400", border: "border-amber-400/30", live: false },
 ];
 
+const ERROR_MESSAGES = {
+  missing_session: "Your session expired — please refresh and try again.",
+  invalid_session: "Couldn't verify your login — please refresh and try again.",
+  no_org: "Couldn't find your organization.",
+  not_configured: "ServiceM8 connection isn't configured on the server yet.",
+  servicem8_denied: "ServiceM8 connection was cancelled.",
+  invalid_callback: "Something went wrong completing the ServiceM8 connection.",
+  state_mismatch: "That connection request looked suspicious, so we blocked it. Please try connecting again.",
+  token_exchange_failed: "ServiceM8 rejected the connection request.",
+  save_failed: "Connected to ServiceM8, but saving the connection failed. Try again.",
+  unexpected: "Something unexpected went wrong connecting to ServiceM8.",
+};
+
 export default function IntegrationsPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950 flex items-center justify-center"><div className="f-mono text-xs text-slate-500 uppercase tracking-widest">Loading...</div></div>}>
+      <IntegrationsPageInner />
+    </Suspense>
+  );
+}
+
+function IntegrationsPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [rows, setRows] = useState([]); // rows from the integrations table
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     (async () => {
@@ -36,6 +59,14 @@ export default function IntegrationsPage() {
     fetchIntegrations();
   }, [orgId]);
 
+  useEffect(() => {
+    const connected = searchParams.get("connected");
+    const errKey = searchParams.get("error");
+    if (connected) setNotice(`Connected to ${PROVIDERS.find((p) => p.key === connected)?.name || connected}.`);
+    if (errKey) setError(ERROR_MESSAGES[errKey] || "Something went wrong.");
+    if (connected || errKey) router.replace("/integrations");
+  }, [searchParams, router]);
+
   const fetchIntegrations = async () => {
     setLoading(true);
     const { data, error } = await supabase.from("integrations").select("*").eq("org_id", orgId);
@@ -50,6 +81,7 @@ export default function IntegrationsPage() {
 
   const isConnected = (key) => !!rows.find((r) => r.provider === key)?.connected;
 
+  // Demo providers: just a status flag in our own database, no real API calls.
   const toggle = async (provider, name) => {
     setBusyKey(provider);
     setError("");
@@ -69,6 +101,48 @@ export default function IntegrationsPage() {
     setBusyKey(null);
   };
 
+  // ServiceM8: real OAuth 2.0 connection.
+  const connectServiceM8 = async () => {
+    setBusyKey("servicem8");
+    setError("");
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      setError("Your session expired — please refresh and try again.");
+      setBusyKey(null);
+      return;
+    }
+    const res = await fetch("/api/integrations/servicem8/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access_token: session.access_token }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.url) {
+      setError(body.error || "Couldn't start the ServiceM8 connection.");
+      setBusyKey(null);
+      return;
+    }
+    window.location.href = body.url;
+  };
+
+  const disconnectServiceM8 = async () => {
+    setBusyKey("servicem8");
+    setError("");
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch("/api/integrations/servicem8/disconnect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access_token: session?.access_token }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setError(body.error || "Failed to disconnect ServiceM8.");
+    } else {
+      await fetchIntegrations();
+    }
+    setBusyKey(null);
+  };
+
   if (!orgId) {
     return <div className="min-h-screen bg-slate-950 flex items-center justify-center"><div className="f-mono text-xs text-slate-500 uppercase tracking-widest">Loading...</div></div>;
   }
@@ -76,6 +150,7 @@ export default function IntegrationsPage() {
   return (
     <Nav title="Integrations">
       <div className="p-4 md:p-6">
+        {notice && <div className="text-sm text-emerald-400 mb-3">{notice}</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         {loading ? (
           <div className="text-sm text-slate-500">Loading integrations...</div>
@@ -91,9 +166,15 @@ export default function IntegrationsPage() {
                       {connected ? "Connected" : "Not Connected"}
                     </Badge>
                   </div>
-                  <p className="text-sm text-slate-400 mb-4">{i.blurb}</p>
+                  <p className="text-sm text-slate-400 mb-1">{i.blurb}</p>
+                  <p className="text-[11px] f-mono uppercase tracking-wide mb-4 text-slate-600">
+                    {i.live ? "Real OAuth connection" : "Status tracker only — not a live API connection"}
+                  </p>
                   <button
-                    onClick={() => toggle(i.key, i.name)}
+                    onClick={() => {
+                      if (i.key === "servicem8") return connected ? disconnectServiceM8() : connectServiceM8();
+                      return toggle(i.key, i.name);
+                    }}
                     disabled={busyKey === i.key}
                     className={`text-sm f-display uppercase tracking-wide px-3.5 py-2 rounded border transition-colors disabled:opacity-50 ${
                       connected
