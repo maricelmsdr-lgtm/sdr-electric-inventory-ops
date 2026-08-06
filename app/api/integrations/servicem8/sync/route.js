@@ -76,9 +76,12 @@ export async function POST(request) {
   const companyName = {};
   for (const c of sm8Companies || []) companyName[c.uuid] = c.name;
 
-  // Skip quotes and cancelled/inactive jobs — only pull real work.
+  // Skip quotes and cancelled jobs — only pull real work. Note: we don't
+  // filter on ServiceM8's "active" flag — it goes to 0 once a job is marked
+  // Completed, which is exactly the job state we most want to sync (that's
+  // when materials used are finalized).
   const relevantJobs = (sm8Jobs || []).filter(
-    (j) => j.uuid && j.status && j.status !== "Quote" && j.status !== "Cancelled" && j.active !== "0"
+    (j) => j.uuid && j.status && j.status !== "Quote" && j.status !== "Cancelled"
   );
 
   const { data: existingJobs } = await admin
