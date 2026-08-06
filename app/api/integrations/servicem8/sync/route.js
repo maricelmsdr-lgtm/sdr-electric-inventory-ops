@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { getValidAccessToken, fetchJobs, fetchJobMaterials, fetchCompanies } from "@/lib/servicem8";
+import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJob, fetchCompanies } from "@/lib/servicem8";
 
 // One-way pull from ServiceM8: jobs + materials used come IN, nothing
 // goes back out. Each material line that matches a part in the SDR
@@ -62,13 +62,9 @@ export async function POST(request) {
     return NextResponse.json({ error: "No Main Warehouse location found for this org — set one up before syncing." }, { status: 400 });
   }
 
-  let sm8Jobs, sm8Materials, sm8Companies;
+  let sm8Jobs, sm8Companies;
   try {
-    [sm8Jobs, sm8Materials, sm8Companies] = await Promise.all([
-      fetchJobs(sm8Token),
-      fetchJobMaterials(sm8Token),
-      fetchCompanies(sm8Token),
-    ]);
+    [sm8Jobs, sm8Companies] = await Promise.all([fetchJobs(sm8Token), fetchCompanies(sm8Token)]);
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
@@ -114,6 +110,18 @@ export async function POST(request) {
         jobsCreated++;
       }
     }
+  }
+
+  // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query —
+  // an unfiltered bulk call doesn't reliably return everything).
+  let sm8Materials = [];
+  try {
+    const materialResults = await Promise.all(
+      Object.keys(jobIdByUuid).map((sm8JobUuid) => fetchJobMaterialsForJob(sm8Token, sm8JobUuid))
+    );
+    sm8Materials = materialResults.flat();
+  } catch (e) {
+    return NextResponse.json({ error: e.message }, { status: 502 });
   }
 
   // Match materials to the parts catalog by SKU or part number
