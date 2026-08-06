@@ -190,7 +190,10 @@ function IntegrationsPageInner() {
     } else {
       setNotice(
         `Synced: ${body.jobsCreated} new job(s), ${body.jobsUpdated} updated, ${body.materialsDeducted} material(s) deducted` +
-          (body.materialsFlagged ? `, ${body.materialsFlagged} flagged for review below.` : ".")
+          (body.materialsFlagged ? `, ${body.materialsFlagged} flagged for review below.` : ".") +
+          (body.diagnostics
+            ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
+            : "")
       );
       await fetchIntegrations();
       await fetchUnmatched();

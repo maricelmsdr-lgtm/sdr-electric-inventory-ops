@@ -139,15 +139,18 @@ export async function POST(request) {
 
   let materialsDeducted = 0;
   let materialsFlagged = 0;
+  let materialsSkippedNoJob = 0;
+  let materialsSkippedNoQty = 0;
+  const totalMaterialsSeen = (sm8Materials || []).length;
 
   for (const m of sm8Materials || []) {
     if (!m.uuid || syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) continue;
 
     const jobId = jobIdByUuid[m.job_uuid];
-    if (!jobId) continue; // material belongs to a job we didn't pull (quote/cancelled) — skip
+    if (!jobId) { materialsSkippedNoJob++; continue; } // material belongs to a job we didn't pull (quote/cancelled) — skip
 
     const qty = Number(m.quantity ?? m.qty ?? 0);
-    if (!qty) continue;
+    if (!qty) { materialsSkippedNoQty++; continue; }
 
     const key = (m.name || "").trim().toLowerCase();
     const match = partByKey[key];
@@ -208,5 +211,12 @@ export async function POST(request) {
     message: `Synced ServiceM8: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review.`,
   });
 
-  return NextResponse.json({ ok: true, jobsCreated, jobsUpdated, materialsDeducted, materialsFlagged });
+  return NextResponse.json({
+    ok: true,
+    jobsCreated,
+    jobsUpdated,
+    materialsDeducted,
+    materialsFlagged,
+    diagnostics: { totalMaterialsSeen, materialsSkippedNoJob, materialsSkippedNoQty },
+  });
 }
