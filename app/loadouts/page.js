@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
 import {
   Panel, Th, Td, Badge, IconBtn, PrimaryBtn, SearchInput,
-  ConfirmModal, ModalShell, Field, inputCls,
+  ConfirmModal, ModalShell, Field, inputCls, PartPicker,
 } from "@/components/ui";
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -329,9 +329,7 @@ function LoadoutModal({ modal, setModal, parts, fleet, resolveFlow, locationById
         </div>
         {d.lineItems.map((li, i) => (
           <div key={i} className="grid grid-cols-[2fr_1fr_auto] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0">
-            <select className={inputCls} value={li.part_id} onChange={(e) => updateLine(i, "part_id", e.target.value)}>
-              {parts.map((p) => <option key={p.id} value={p.id}>{p.part_no} — {p.sku}</option>)}
-            </select>
+            <PartPicker parts={parts} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
             <input type="number" min="1" className={inputCls} value={li.qty} onChange={(e) => updateLine(i, "qty", Number(e.target.value))} />
             <IconBtn danger onClick={() => removeLine(i)}><Trash2 size={14} /></IconBtn>
           </div>

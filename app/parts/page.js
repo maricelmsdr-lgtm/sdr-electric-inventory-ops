@@ -1,15 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Package, Plus, Pencil, Trash2, MapPin, AlertTriangle, Warehouse } from "lucide-react";
+import { Package, Plus, Pencil, Trash2, MapPin, AlertTriangle, Warehouse, ImagePlus } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { uploadOrgFile, getPublicUrl } from "@/lib/storage";
 import Nav from "@/components/Nav";
 import {
   Panel, Th, Td, Badge, TradeBadge, IconBtn, PrimaryBtn, SearchInput,
   ConfirmModal, ModalShell, Field, inputCls,
 } from "@/components/ui";
 
-const emptyPart = { part_no: "", sku: "", category: "Electrical", location: "", min_reorder: 0, unit_cost: 0, description: "" };
+const emptyPart = { part_no: "", sku: "", category: "Electrical", location: "", min_reorder: 0, unit_cost: 0, description: "", photo_path: null };
 const CATEGORIES = ["Electrical", "Plumbing", "HVAC", "General"];
 
 export default function PartsPage() {
@@ -23,6 +24,7 @@ export default function PartsPage() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [locModal, setLocModal] = useState(null); // { part, rows }
   const [error, setError] = useState("");
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
   // Auth guard + load profile/org
   useEffect(() => {
@@ -107,6 +109,20 @@ export default function PartsPage() {
     await supabase.from("activity_log").insert({ org_id: orgId, user_id: user.id, message });
   };
 
+  const handlePhotoChange = async (file) => {
+    if (!file) return;
+    setUploadingPhoto(true);
+    setError("");
+    try {
+      const path = await uploadOrgFile("part-photos", orgId, file);
+      setModal((prev) => ({ ...prev, data: { ...prev.data, photo_path: path } }));
+    } catch (e) {
+      setError(e.message || "Photo upload failed.");
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
   const filtered = parts.filter((p) =>
     `${p.part_no} ${p.sku} ${p.category} ${p.location}`.toLowerCase().includes(q.toLowerCase())
   );
@@ -147,13 +163,23 @@ export default function PartsPage() {
               <table className="w-full min-w-[820px]">
                 <thead>
                   <tr>
-                    <Th>Part No.</Th><Th>SKU</Th><Th>Category</Th><Th>Shelf / Bin</Th>
+                    <Th></Th><Th>Part No.</Th><Th>SKU</Th><Th>Category</Th><Th>Shelf / Bin</Th>
                     <Th className="text-right">Total Qty</Th><Th className="text-right">Min Reorder</Th><Th></Th>
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.map((p) => (
                     <tr key={p.id} className={`border-t border-slate-800/70 hover:bg-slate-900/40 ${p.qty <= p.min_reorder ? "bg-red-500/5" : ""}`}>
+                      <Td>
+                        {p.photo_path ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={getPublicUrl("part-photos", p.photo_path)} alt={p.part_no} className="w-9 h-9 rounded object-cover border border-slate-700" />
+                        ) : (
+                          <div className="w-9 h-9 rounded border border-slate-800 bg-slate-950 flex items-center justify-center text-slate-700">
+                            <ImagePlus size={14} />
+                          </div>
+                        )}
+                      </Td>
                       <Td className="f-mono text-slate-100">{p.part_no}</Td>
                       <Td className="f-mono text-slate-400">{p.sku}</Td>
                       <Td><TradeBadge category={p.category} /></Td>
@@ -174,7 +200,7 @@ export default function PartsPage() {
                     </tr>
                   ))}
                   {filtered.length === 0 && (
-                    <tr><Td colSpan={7} className="text-slate-500">No parts yet — add your first one above.</Td></tr>
+                    <tr><Td colSpan={8} className="text-slate-500">No parts yet — add your first one above.</Td></tr>
                   )}
                 </tbody>
               </table>
@@ -208,6 +234,26 @@ export default function PartsPage() {
           <Field label="Description">
             <input className={inputCls} value={modal.data.description || ""} onChange={(e) => setModal({ ...modal, data: { ...modal.data, description: e.target.value } })} />
           </Field>
+          <Field label="Photo (optional)">
+            <div className="flex items-center gap-3">
+              {modal.data.photo_path ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={getPublicUrl("part-photos", modal.data.photo_path)} alt="" className="w-14 h-14 rounded object-cover border border-slate-700" />
+              ) : (
+                <div className="w-14 h-14 rounded border border-dashed border-slate-700 bg-slate-950 flex items-center justify-center text-slate-700">
+                  <ImagePlus size={18} />
+                </div>
+              )}
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => handlePhotoChange(e.target.files?.[0])}
+                disabled={uploadingPhoto}
+                className="text-xs text-slate-400 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border file:border-slate-700 file:bg-slate-900 file:text-slate-300 file:text-xs"
+              />
+            </div>
+            {uploadingPhoto && <div className="text-xs text-slate-500 mt-1">Uploading...</div>}
+          </Field>
           {modal.mode === "create" && (
             <div className="text-xs text-slate-500 -mt-1 mb-3">
               New parts start at 0 on hand — use <span className="text-orange-400">Stock In</span> afterward to receive quantity into a location.
@@ -215,7 +261,7 @@ export default function PartsPage() {
           )}
           <div className="flex justify-end gap-2 mt-4">
             <button onClick={() => setModal(null)} className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
-            <PrimaryBtn onClick={save}>Save</PrimaryBtn>
+            <PrimaryBtn onClick={save} disabled={uploadingPhoto}>Save</PrimaryBtn>
           </div>
         </ModalShell>
       )}

@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
 import {
   Panel, Th, Td, Badge, IconBtn, PrimaryBtn, SearchInput,
-  ConfirmModal, ModalShell, Field, inputCls,
+  ConfirmModal, ModalShell, Field, inputCls, PartPicker,
 } from "@/components/ui";
 
 const PRIORITIES = ["Low", "Normal", "Urgent"];
@@ -158,9 +158,7 @@ export default function FieldRequestsPage() {
             </select>
           </Field>
           <Field label="Part">
-            <select className={inputCls} value={modal.data.part_id} onChange={(e) => setModal({ ...modal, data: { ...modal.data, part_id: e.target.value } })}>
-              {parts.map((p) => <option key={p.id} value={p.id}>{p.part_no} — {p.sku}</option>)}
-            </select>
+            <PartPicker parts={parts} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
           </Field>
           <Field label="Qty Requested"><input type="number" min="1" className={inputCls} value={modal.data.qty_requested} onChange={(e) => setModal({ ...modal, data: { ...modal.data, qty_requested: Number(e.target.value) } })} /></Field>
           <Field label="Priority">

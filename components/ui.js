@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useRef, useState } from "react";
 import { Search, X, AlertTriangle, Zap, Droplets, Wind, Package } from "lucide-react";
 
 export const TRADE_STYLES = {
@@ -157,5 +158,82 @@ export function Field({ label, children }) {
       <span className="block text-[11px] f-mono uppercase text-slate-500 mb-1">{label}</span>
       {children}
     </label>
+  );
+}
+
+// Type-to-search dropdown for picking a part by number or SKU — swap in
+// anywhere a plain <select> of parts would otherwise force scrolling
+// through a huge list (Jobs, Stock In, Stock Adjustments, POs, Loadouts,
+// Field Requests, Cycle Counts). Matches on part_no, sku, and description.
+export function PartPicker({ parts, value, onChange, placeholder = "Type part no. or SKU..." }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const wrapRef = useRef(null);
+
+  const selected = parts.find((p) => p.id === value);
+  const label = (p) => `${p.part_no}${p.sku ? " — " + p.sku : ""}`;
+
+  useEffect(() => {
+    if (!open) setQuery(selected ? label(selected) : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, parts.length]);
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+        setOpen(false);
+        setQuery(selected ? label(selected) : "");
+      }
+    };
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = (
+    q ? parts.filter((p) => `${p.part_no} ${p.sku || ""} ${p.description || ""}`.toLowerCase().includes(q)) : parts
+  ).slice(0, 50);
+
+  const pick = (p) => {
+    onChange(p.id);
+    setQuery(label(p));
+    setOpen(false);
+  };
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <input
+        className={inputCls}
+        value={query}
+        placeholder={placeholder}
+        onFocus={() => { setOpen(true); setQuery(""); }}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); setHighlight(0); }}
+        onKeyDown={(e) => {
+          if (!open) return;
+          if (e.key === "ArrowDown") { e.preventDefault(); setHighlight((h) => Math.min(h + 1, filtered.length - 1)); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); setHighlight((h) => Math.max(h - 1, 0)); }
+          else if (e.key === "Enter") { e.preventDefault(); if (filtered[highlight]) pick(filtered[highlight]); }
+          else if (e.key === "Escape") { setOpen(false); setQuery(selected ? label(selected) : ""); }
+        }}
+      />
+      {open && (
+        <div className="absolute z-30 mt-1 w-full max-h-56 overflow-y-auto bg-slate-900 border border-slate-700 rounded shadow-lg">
+          {filtered.length === 0 && <div className="px-3 py-2 text-sm text-slate-500">No matching parts.</div>}
+          {filtered.map((p, i) => (
+            <button
+              type="button"
+              key={p.id}
+              onClick={() => pick(p)}
+              className={`w-full text-left px-3 py-1.5 text-sm ${i === highlight ? "bg-orange-600/20 text-orange-300" : "text-slate-200 hover:bg-slate-800"}`}
+            >
+              <span className="f-mono">{p.part_no}</span>
+              {p.sku ? <span className="text-slate-500"> — {p.sku}</span> : null}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

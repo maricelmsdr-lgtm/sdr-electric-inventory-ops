@@ -6,7 +6,7 @@ import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
 import {
   Panel, Th, Td, IconBtn, PrimaryBtn, SearchInput,
-  ConfirmModal, ModalShell, Field, inputCls,
+  ConfirmModal, ModalShell, Field, inputCls, PartPicker,
 } from "@/components/ui";
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -171,13 +171,11 @@ export default function CycleCountsPage() {
             </select>
           </Field>
           <Field label="Part">
-            <select
-              className={inputCls}
+            <PartPicker
+              parts={parts}
               value={modal.data.part_id}
-              onChange={(e) => setModal({ ...modal, data: { ...modal.data, part_id: e.target.value, system_qty: systemQtyAt(e.target.value, modal.data.location_id) } })}
-            >
-              {parts.map((p) => <option key={p.id} value={p.id}>{p.part_no} — {p.sku}</option>)}
-            </select>
+              onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId, system_qty: systemQtyAt(partId, modal.data.location_id) } })}
+            />
           </Field>
           <Field label="System Qty (at this location)"><input type="number" className={inputCls} value={modal.data.system_qty} onChange={(e) => setModal({ ...modal, data: { ...modal.data, system_qty: Number(e.target.value) } })} /></Field>
           <Field label="Counted Qty"><input type="number" className={inputCls} value={modal.data.counted_qty} onChange={(e) => setModal({ ...modal, data: { ...modal.data, counted_qty: Number(e.target.value) } })} /></Field>
