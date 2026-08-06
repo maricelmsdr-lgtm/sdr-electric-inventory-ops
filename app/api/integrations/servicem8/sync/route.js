@@ -217,6 +217,14 @@ export async function POST(request) {
     jobsUpdated,
     materialsDeducted,
     materialsFlagged,
-    diagnostics: { totalMaterialsSeen, materialsSkippedNoJob, materialsSkippedNoQty },
+    diagnostics: {
+      totalMaterialsSeen,
+      materialsSkippedNoJob,
+      materialsSkippedNoQty,
+      // Temporary: raw shape of what ServiceM8 actually returns, so we can
+      // see real field names instead of guessing against docs. Remove once
+      // matching is confirmed working.
+      sampleRawMaterials: (sm8Materials || []).slice(0, 3),
+    },
   });
 }

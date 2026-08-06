@@ -43,6 +43,7 @@ function IntegrationsPageInner() {
   const [busyKey, setBusyKey] = useState(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [rawDebug, setRawDebug] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
   const [unmatched, setUnmatched] = useState([]);
@@ -195,6 +196,7 @@ function IntegrationsPageInner() {
             ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
             : "")
       );
+      setRawDebug(body.diagnostics?.sampleRawMaterials || null);
       await fetchIntegrations();
       await fetchUnmatched();
     }
@@ -265,6 +267,12 @@ function IntegrationsPageInner() {
     <Nav title="Integrations">
       <div className="p-4 md:p-6">
         {notice && <div className="text-sm text-emerald-400 mb-3">{notice}</div>}
+        {rawDebug && rawDebug.length > 0 && (
+          <div className="mb-4 bg-slate-950 border border-slate-800 rounded p-3">
+            <div className="text-[11px] f-mono uppercase text-slate-500 mb-1">Raw ServiceM8 data (temporary debug)</div>
+            <pre className="text-xs text-slate-300 whitespace-pre-wrap break-all">{JSON.stringify(rawDebug, null, 2)}</pre>
+          </div>
+        )}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         {loading ? (
           <div className="text-sm text-slate-500">Loading integrations...</div>
