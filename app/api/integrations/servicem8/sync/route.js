@@ -181,7 +181,7 @@ export async function POST(request) {
   // catalog or deduct stock for — but they're still real invoice line
   // items, so we record them on the job with no linked part instead of
   // silently dropping them or flagging them as "no matching part found".
-  const NON_INVENTORY_PATTERN = /\b(labou?r|technician|apprentice|service call|truck charge|call[\s-]?out|travel time|site visit|diagnostic fee|trip charge|mileage)\b/i;
+  const NON_INVENTORY_PATTERN = /\b(labou?r|technician|apprentice|service\s?(call|rate)|truck charge|call[\s-]?out|call[\s-]?back|travel time|site visit|diagnostic fee|trip charge|mileage|warranty\s?(service|call|visit|callback)|after[\s-]?installation)\b/i;
 
   for (const m of sm8Materials || []) {
     if (!m.uuid || syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) continue;
