@@ -206,19 +206,11 @@ function IntegrationsPageInner() {
       }
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.ok) {
-        // A 504 means the platform's gateway killed the request before our
-        // route could respond at all — that's why body.error is empty (there
-        // was no JSON response to read an error from). Distinguish it from a
-        // real server-side error so this doesn't just say "Sync failed."
-        // with no explanation.
-        if (res.status === 504) {
-          setError("Sync timed out before finishing — this can happen with a large batch of jobs/materials. Try again; if it keeps happening, it may need a smaller sync window.");
-        } else {
-          setError(body.error || `Sync failed (status ${res.status}).`);
-        }
+        setError(body.error || "Sync failed.");
       } else {
         setNotice(
           `Synced: ${body.jobsCreated} new job(s), ${body.jobsUpdated} updated, ${body.materialsDeducted} material(s) deducted` +
+            (body.materialsNonInventory ? `, ${body.materialsNonInventory} labor/service charge(s) recorded` : "") +
             (body.materialsFlagged ? `, ${body.materialsFlagged} flagged for review below.` : ".") +
             (body.diagnostics
               ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
