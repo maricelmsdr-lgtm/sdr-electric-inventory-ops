@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJob, fetchCompanies } from "@/lib/servicem8";
+import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJobs, fetchCompanies } from "@/lib/servicem8";
+
+// Retrying through a rate limit can take a while (see sm8Fetch's backoff),
+// so give this route more room than the default 10s.
+export const maxDuration = 60;
 
 // One-way pull from ServiceM8: jobs + materials used come IN, nothing
 // goes back out. Each material line that matches a part in the SDR
@@ -76,9 +80,19 @@ export async function POST(request) {
   // filter on ServiceM8's "active" flag — it goes to 0 once a job is marked
   // Completed, which is exactly the job state we most want to sync (that's
   // when materials used are finalized).
-  const relevantJobs = (sm8Jobs || []).filter(
-    (j) => j.uuid && j.status && j.status !== "Quote" && j.status !== "Cancelled"
-  );
+  //
+  // Also skip ServiceM8's own built-in "SAMPLE · Help Guide Job" — every new
+  // ServiceM8 account gets one automatically, with placeholder tooltip text
+  // as fake material line items ("click produce invoice to...", etc). It's
+  // not real customer work, so it shouldn't show up in Jobs or generate
+  // "Needs Review" noise on every sync.
+  const relevantJobs = (sm8Jobs || []).filter((j) => {
+    if (!j.uuid || !j.status || j.status === "Quote" || j.status === "Cancelled") return false;
+    const jobNo = (j.generated_job_id || "").trim().toUpperCase();
+    const client = (companyName[j.company_uuid] || "").trim().toLowerCase();
+    if (jobNo === "SAMPLE" || client.includes("help guide")) return false;
+    return true;
+  });
 
   const { data: existingJobs } = await admin
     .from("jobs")
@@ -113,13 +127,13 @@ export async function POST(request) {
   }
 
   // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query —
-  // an unfiltered bulk call doesn't reliably return everything).
+  // an unfiltered bulk call doesn't reliably return everything). Done
+  // sequentially with a small pause between calls to stay under ServiceM8's
+  // per-minute rate limit — firing one request per job all at once trips it
+  // as soon as there's more than a few jobs.
   let sm8Materials = [];
   try {
-    const materialResults = await Promise.all(
-      Object.keys(jobIdByUuid).map((sm8JobUuid) => fetchJobMaterialsForJob(sm8Token, sm8JobUuid))
-    );
-    sm8Materials = materialResults.flat();
+    sm8Materials = await fetchJobMaterialsForJobs(sm8Token, Object.keys(jobIdByUuid));
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
