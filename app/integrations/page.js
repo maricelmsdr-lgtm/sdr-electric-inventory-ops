@@ -269,6 +269,13 @@ function IntegrationsPageInner() {
       return;
     }
 
+    // Teach the matcher this name, so the next time ServiceM8 sends
+    // "row.raw_name" on a different job, it auto-matches instead of
+    // showing up in Needs Review again.
+    await supabase
+      .from("part_aliases")
+      .upsert({ org_id: orgId, alias_name: row.raw_name, part_id: partId }, { onConflict: "org_id,alias_name" });
+
     await supabase.from("unmatched_materials").update({ status: "resolved", resolved_part_id: partId }).eq("id", row.id);
     await logActivity(`Resolved ServiceM8 material "${row.raw_name}" → part, deducted ${row.qty} from stock`);
     await fetchUnmatched();

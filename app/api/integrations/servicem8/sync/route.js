@@ -148,15 +148,19 @@ export async function POST(request) {
   }
 
   // Match materials to the parts catalog by SKU or part number
-  // (case-insensitive, exact match on the ServiceM8 material name).
-  const { data: parts } = await admin
-    .from("parts")
-    .select("id, sku, part_no, unit_cost")
-    .eq("org_id", profile.org_id);
+  // (case-insensitive, exact match on the ServiceM8 material name), plus
+  // any names previously taught via manual resolution in Needs Review.
+  const [{ data: parts }, { data: aliases }] = await Promise.all([
+    admin.from("parts").select("id, sku, part_no, unit_cost").eq("org_id", profile.org_id),
+    admin.from("part_aliases").select("alias_name, part_id, parts(id, sku, part_no, unit_cost)").eq("org_id", profile.org_id),
+  ]);
   const partByKey = {};
   for (const p of parts || []) {
     if (p.sku) partByKey[p.sku.trim().toLowerCase()] = p;
     if (p.part_no) partByKey[p.part_no.trim().toLowerCase()] = p;
+  }
+  for (const a of aliases || []) {
+    if (a.alias_name && a.parts) partByKey[a.alias_name.trim().toLowerCase()] = a.parts;
   }
 
   const { data: alreadySyncedLines } = await admin
@@ -222,9 +226,12 @@ export async function POST(request) {
       continue;
     }
 
-    // Try the deduction first — the DB rejects it if it would take
-    // that location negative. If it fails, flag for review instead
-    // of recording a line item for stock that was never actually moved.
+    // Inventory is allowed to go negative (a job's parts were genuinely
+    // used whether or not stock caught up yet — see inventory_balances'
+    // dropped chk_balance_quantity/chk_inventory_value constraints), so
+    // this should now only fail for a genuine, unexpected DB error — not
+    // for insufficient stock. Flag it for review rather than silently
+    // dropping the material if it ever does.
     const { error: rpcErr } = await admin.rpc("apply_inventory_qty_change", {
       p_org_id: profile.org_id,
       p_part_id: match.id,
