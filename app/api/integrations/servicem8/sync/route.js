@@ -1216,6 +1216,8 @@ export async function POST(request) {
 
   let materialsSkippedBundleHeader = 0;
 
+  let materialsSkippedDuplicate = 0;
+
   const materialPayload = [];
 
   /* ==========================================================
@@ -1306,6 +1308,7 @@ export async function POST(request) {
         material.uuid
       )
     ) {
+      materialsSkippedDuplicate++;
       continue;
     }
 
@@ -1582,8 +1585,8 @@ export async function POST(request) {
 
       message:
         syncComplete
-          ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} physical material(s) deducted, ${materialsFlagged} physical material(s) flagged for review, ${materialsSkippedNonInventory} labor/service charge(s) excluded, ${materialsSkippedBundleHeader} bundle header(s) excluded.`
-          : `ServiceM8 sync progress: processed ${completedPrefixCount} contiguous job(s) from batch ${batchStart + 1}-${batchEnd}; ${materialsDeducted} physical material(s) deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} labor/service charge(s) excluded, ${materialsSkippedBundleHeader} bundle header(s) excluded.`,
+          ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} physical material(s) deducted, ${materialsFlagged} physical material(s) flagged for review, ${materialsSkippedNonInventory} labor/service charge(s) excluded, ${materialsSkippedBundleHeader} bundle header(s) excluded, ${materialsSkippedDuplicate} already processed.`
+          : `ServiceM8 sync progress: processed ${completedPrefixCount} contiguous job(s) from batch ${batchStart + 1}-${batchEnd}; ${materialsDeducted} physical material(s) deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} labor/service charge(s) excluded, ${materialsSkippedBundleHeader} bundle header(s) excluded, ${materialsSkippedDuplicate} already processed.`,
     });
 
   /* ==========================================================
@@ -1656,6 +1659,8 @@ export async function POST(request) {
       materialsSkippedNonInventory,
 
       materialsSkippedBundleHeader,
+
+      materialsSkippedDuplicate,
 
       candidateInventoryMaterials:
         materialPayload.length,

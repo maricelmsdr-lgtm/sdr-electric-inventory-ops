@@ -221,7 +221,7 @@ function IntegrationsPageInner() {
           `Synced: ${body.jobsCreated} new job(s), ${body.jobsUpdated} updated, ${body.materialsDeducted} material(s) deducted` +
             (body.materialsFlagged ? `, ${body.materialsFlagged} flagged for review below.` : ".") +
             (body.diagnostics
-              ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNonInventory} labor/service charge(s) excluded, ${body.diagnostics.materialsSkippedBundleHeader} bundle header(s) excluded, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
+              ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNonInventory} labor/service charge(s) excluded, ${body.diagnostics.materialsSkippedBundleHeader} bundle header(s) excluded, ${body.diagnostics.materialsSkippedDuplicate} already processed, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
               : "")
         );
         setRawDebug(body.diagnostics?.sampleRawMaterials || null);
