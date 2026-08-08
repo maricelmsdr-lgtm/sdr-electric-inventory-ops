@@ -37,6 +37,68 @@ function normalize(value) {
 }
 
 /* ============================================================
+   ORGANIZATION RESOLUTION
+============================================================
+
+   Prefer an explicit org_id from the client (body, query string,
+   or header). If none is supplied, fall back to the single org
+   on record — this installation is single-tenant today, so that
+   fallback is safe and prevents the sync from being blocked by a
+   frontend that doesn't pass org_id.
+============================================================ */
+
+async function resolveOrgId(request, body, admin) {
+  const bodyOrgId = body?.org_id || body?.orgId || null;
+  if (bodyOrgId) return String(bodyOrgId).trim();
+
+  const url = new URL(request.url);
+  const queryOrgId =
+    url.searchParams.get("org_id") || url.searchParams.get("orgId");
+  if (queryOrgId) return String(queryOrgId).trim();
+
+  const headerOrgId = request.headers.get("x-org-id");
+  if (headerOrgId) return String(headerOrgId).trim();
+
+  const { data: orgRows, error: orgRowsError } = await admin
+    .from("parts")
+    .select("org_id")
+    .not("org_id", "is", null)
+    .limit(1000);
+
+  if (orgRowsError) {
+    throw new Error(
+      `Could not automatically determine organization: ${orgRowsError.message}`
+    );
+  }
+
+  const uniqueOrgIds = [
+    ...new Set(
+      (orgRows || [])
+        .map((row) => row?.org_id)
+        .filter(Boolean)
+        .map((id) => String(id).trim())
+    ),
+  ];
+
+  if (uniqueOrgIds.length === 1) {
+    console.log(
+      `[sm8 sync] org_id not supplied by client — auto-resolved to ${uniqueOrgIds[0]}`
+    );
+    return uniqueOrgIds[0];
+  }
+
+  if (uniqueOrgIds.length === 0) {
+    throw new Error(
+      "Could not determine organization automatically because no inventory parts have an org_id."
+    );
+  }
+
+  throw new Error(
+    "Multiple organizations were found, but the request did not provide org_id."
+  );
+}
+
+/* ============================================================
    NON-INVENTORY DETECTION
 ============================================================ */
 
@@ -253,19 +315,6 @@ export async function POST(request) {
     .json()
     .catch(() => ({}));
 
-  const requestedOrgId = body?.org_id;
-
-  if (!requestedOrgId) {
-    return NextResponse.json(
-      {
-        error: "Missing org_id.",
-      },
-      {
-        status: 400,
-      }
-    );
-  }
-
   let admin;
 
   try {
@@ -282,7 +331,22 @@ export async function POST(request) {
     );
   }
 
-  const orgId = requestedOrgId;
+  let orgId;
+
+  try {
+    orgId = await resolveOrgId(request, body, admin);
+  } catch (e) {
+    return NextResponse.json(
+      {
+        error: e?.message || "Unable to determine organization.",
+      },
+      {
+        status: 400,
+      }
+    );
+  }
+
+  console.log(`[sm8 sync] using org_id=${orgId}`);
 
   /* ==========================================================
      VERIFY ORGANIZATION
@@ -315,6 +379,7 @@ export async function POST(request) {
       {
         error:
           "The supplied organization does not have any inventory parts.",
+        org_id: orgId,
       },
       {
         status: 400,
@@ -812,6 +877,8 @@ export async function POST(request) {
     return NextResponse.json({
       ok: true,
       syncComplete: true,
+
+      org_id: orgId,
 
       jobsCreated,
       jobsUpdated,
@@ -1466,6 +1533,8 @@ export async function POST(request) {
       warning:
         "Materials were processed, but the sync checkpoint could not be saved. Existing material UUID protection will prevent duplicate processing.",
 
+      org_id: orgId,
+
       jobsCreated,
       jobsUpdated,
 
@@ -1525,6 +1594,8 @@ export async function POST(request) {
     ok: true,
 
     syncComplete,
+
+    org_id: orgId,
 
     jobsCreated,
     jobsUpdated,
