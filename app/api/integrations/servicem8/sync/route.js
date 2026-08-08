@@ -185,7 +185,7 @@ export async function POST(request) {
   // catalog or deduct stock for — but they're still real invoice line
   // items, so we record them on the job with no linked part instead of
   // silently dropping them or flagging them as "no matching part found".
-  const NON_INVENTORY_PATTERN = /\b(labou?r|technician|apprentice|service\s?(call|rate)|truck charge|call[\s-]?out|call[\s-]?back|travel time|site visit|diagnostic fee|trip charge|mileage|warranty\s?(service|call|visit|callback)|after[\s-]?installation)\b/i;
+  const NON_INVENTORY_PATTERN = /\b(labou?r|technician|apprentice|service\s?(call|rate)|truck charge|call[\s-]?out|call[\s-]?back|travel time|site visit|diagnostic fee|trip charge|mileage|warranty\s?(service|call|visit|callback)|after[\s-]?installation|rental)\b|project[\s-]?based material/i;
 
   for (const m of sm8Materials || []) {
     if (!m.uuid || syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) continue;
@@ -196,7 +196,12 @@ export async function POST(request) {
     const qty = Number(m.quantity ?? m.qty ?? 0);
     if (!qty) { materialsSkippedNoQty++; continue; }
 
-    if (NON_INVENTORY_PATTERN.test(m.name || "")) {
+    // "Project based Materials" is ServiceM8's own generic bundle label, not
+    // a specific item — and a material with no name at all has nothing a
+    // human could search the parts catalog for anyway. Both get recorded
+    // as a non-inventory line (preserving the dollar value for invoicing)
+    // instead of cluttering Needs Review with something unresolvable.
+    if (!m.name?.trim() || NON_INVENTORY_PATTERN.test(m.name)) {
       await admin.from("job_line_items").insert({
         job_id: jobId,
         part_id: null,
