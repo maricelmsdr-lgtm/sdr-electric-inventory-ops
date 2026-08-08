@@ -19,8 +19,14 @@
 -- partial unique index on servicem8_job_uuid (004_servicem8_sync.sql).
 -- Returns id + servicem8_job_uuid for every row touched, so the caller
 -- can build its uuid → id map without a separate query.
+--
+-- The returned columns are named out_id / out_servicem8_job_uuid rather
+-- than id / servicem8_job_uuid — reusing the real column names here made
+-- every unqualified reference inside the function (including the ON
+-- CONFLICT target, which Postgres won't let you table-qualify) ambiguous
+-- between the table column and the function's own OUT parameter.
 create or replace function upsert_synced_jobs(p_jobs jsonb)
-returns table(id uuid, servicem8_job_uuid text)
+returns table(out_id uuid, out_servicem8_job_uuid text)
 language plpgsql
 security definer
 set search_path = public
