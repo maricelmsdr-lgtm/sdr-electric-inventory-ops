@@ -13,6 +13,9 @@ export const maxDuration = 60;
 // stock on hand, is written to unmatched_materials for manual review
 // instead of silently failing or going negative.
 export async function POST(request) {
+  const t0 = Date.now();
+  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+
   const { access_token } = await request.json().catch(() => ({}));
   if (!access_token) {
     return NextResponse.json({ error: "Missing session." }, { status: 401 });
@@ -81,6 +84,7 @@ export async function POST(request) {
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
+  console.log(`[sm8 sync] fetched ${sm8Jobs?.length ?? 0} jobs, ${sm8Companies?.length ?? 0} companies — ${elapsed()}`);
 
   const companyName = {};
   for (const c of sm8Companies || []) companyName[c.uuid] = c.name;
@@ -144,18 +148,20 @@ export async function POST(request) {
       })
     );
   }
+  console.log(`[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`);
 
   // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query —
-  // an unfiltered bulk call doesn't reliably return everything). Done
-  // sequentially with a small pause between calls to stay under ServiceM8's
-  // per-minute rate limit — firing one request per job all at once trips it
-  // as soon as there's more than a few jobs.
+  // an unfiltered bulk call doesn't reliably return everything). Done in
+  // small concurrent batches (see fetchJobMaterialsForJobs) to stay under
+  // ServiceM8's per-minute rate limit while still finishing well inside the
+  // route's time limit.
   let sm8Materials = [];
   try {
     sm8Materials = await fetchJobMaterialsForJobs(sm8Token, Object.keys(jobIdByUuid));
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
+  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs — ${elapsed()}`);
 
   // Match materials to the parts catalog by SKU or part number
   // (case-insensitive, exact match on the ServiceM8 material name).
@@ -178,20 +184,32 @@ export async function POST(request) {
   const { data: alreadyFlagged } = await admin.from("unmatched_materials").select("servicem8_material_uuid");
   const flaggedUuids = new Set((alreadyFlagged || []).map((f) => f.servicem8_material_uuid));
 
+  // Each material line does 1-2 database round trips (a stock-deduction RPC,
+  // then either an insert or a flag). Doing that one line at a time was the
+  // remaining bottleneck once the ServiceM8 fetches were batched — with a
+  // few hundred material lines across 90 days of jobs, sequential round
+  // trips alone can exceed the route's time limit. These are all writes to
+  // our own database (no external rate limit), so batching them concurrently
+  // is safe — apply_inventory_qty_change does its increment/negative-check
+  // as a single atomic update, so concurrent calls (even against the same
+  // part) still serialize correctly at the database level.
+  const MATERIAL_PROCESS_BATCH_SIZE = 8;
   let materialsDeducted = 0;
   let materialsFlagged = 0;
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
   const totalMaterialsSeen = (sm8Materials || []).length;
 
-  for (const m of sm8Materials || []) {
-    if (!m.uuid || syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) continue;
+  const materialsToProcess = (sm8Materials || []).filter(
+    (m) => m.uuid && !syncedUuids.has(m.uuid) && !flaggedUuids.has(m.uuid)
+  );
 
+  const processMaterial = async (m) => {
     const jobId = jobIdByUuid[m.job_uuid];
-    if (!jobId) { materialsSkippedNoJob++; continue; } // material belongs to a job we didn't pull (quote/cancelled) — skip
+    if (!jobId) return "skipped_no_job"; // material belongs to a job we didn't pull (quote/cancelled)
 
     const qty = Number(m.quantity ?? m.qty ?? 0);
-    if (!qty) { materialsSkippedNoQty++; continue; }
+    if (!qty) return "skipped_no_qty";
 
     const key = (m.name || "").trim().toLowerCase();
     const match = partByKey[key];
@@ -206,8 +224,7 @@ export async function POST(request) {
         unit_cost: Number(m.cost) || 0,
         reason: "no_match",
       });
-      materialsFlagged++;
-      continue;
+      return "flagged";
     }
 
     // Try the deduction first — the DB rejects it if it would take
@@ -230,8 +247,7 @@ export async function POST(request) {
         unit_cost: Number(m.cost) || 0,
         reason: "insufficient_stock",
       });
-      materialsFlagged++;
-      continue;
+      return "flagged";
     }
 
     await admin.from("job_line_items").insert({
@@ -242,8 +258,21 @@ export async function POST(request) {
       sale_cost: Number(m.price) || 0,
       servicem8_material_uuid: m.uuid,
     });
-    materialsDeducted++;
+    return "deducted";
+  };
+
+  for (let i = 0; i < materialsToProcess.length; i += MATERIAL_PROCESS_BATCH_SIZE) {
+    const batch = materialsToProcess.slice(i, i + MATERIAL_PROCESS_BATCH_SIZE);
+    const outcomes = await Promise.all(batch.map(processMaterial));
+    for (const outcome of outcomes) {
+      if (outcome === "deducted") materialsDeducted++;
+      else if (outcome === "flagged") materialsFlagged++;
+      else if (outcome === "skipped_no_job") materialsSkippedNoJob++;
+      else if (outcome === "skipped_no_qty") materialsSkippedNoQty++;
+    }
   }
+
+  console.log(`[sm8 sync] processed ${materialsToProcess.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) — ${elapsed()}`);
 
   await admin.from("integrations").update({ last_synced_at: new Date().toISOString() }).eq("id", integration.id);
   await admin.from("activity_log").insert({
