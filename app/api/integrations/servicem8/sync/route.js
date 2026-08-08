@@ -13,12 +13,54 @@ export const maxDuration = 60;
 const JOB_BATCH_SIZE = 10;
 const SYNC_WINDOW_DAYS = 14;
 
+// ------------------------------------------------------------
+// LABOR DETECTION
+// ------------------------------------------------------------
+//
+// Labor is NOT inventory.
+//
+// Examples:
+// - Technician Labour
+// - Technician Labor
+// - Technician Labour After Hours (2Hr minimum)
+// - 2 HR
+// - 2 HRS
+// - 3 Hours
+// - After Hours
+//
+// These items must never be sent to inventory deduction.
+//
+
+function isLaborItem(name) {
+  const value = String(name || "").trim().toLowerCase();
+
+  // labor / labour
+  if (/\blabou?r\b/i.test(value)) {
+    return true;
+  }
+
+  // hour / hours
+  if (/\bhours?\b/i.test(value)) {
+    return true;
+  }
+
+  // hr / hrs, including "2Hr", "2 Hrs", etc.
+  if (/(?:^|[^a-z])(?:\d+\s*)?hrs?\b/i.test(value)) {
+    return true;
+  }
+
+  return false;
+}
+
 export async function POST(request) {
   const t0 = Date.now();
+
   const elapsed = () =>
     `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-  const { access_token } = await request.json().catch(() => ({}));
+  const { access_token } = await request
+    .json()
+    .catch(() => ({}));
 
   if (!access_token) {
     return NextResponse.json(
@@ -95,7 +137,10 @@ export async function POST(request) {
   let sm8Token;
 
   try {
-    sm8Token = await getValidAccessToken(admin, integration.id);
+    sm8Token = await getValidAccessToken(
+      admin,
+      integration.id
+    );
   } catch (e) {
     return NextResponse.json(
       { error: e.message },
@@ -129,9 +174,14 @@ export async function POST(request) {
   // ------------------------------------------------------------
 
   const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - SYNC_WINDOW_DAYS);
 
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  cutoff.setDate(
+    cutoff.getDate() - SYNC_WINDOW_DAYS
+  );
+
+  const cutoffStr = cutoff
+    .toISOString()
+    .slice(0, 10);
 
   let sm8Jobs;
   let sm8Companies;
@@ -180,7 +230,9 @@ export async function POST(request) {
       return false;
     }
 
-    const jobNo = (j.generated_job_id || "")
+    const jobNo = (
+      j.generated_job_id || ""
+    )
       .trim()
       .toUpperCase();
 
@@ -204,7 +256,9 @@ export async function POST(request) {
   // Sort UUIDs so the checkpoint remains stable even if
   // ServiceM8 changes the order of returned jobs.
   relevantJobs.sort((a, b) =>
-    String(a.uuid).localeCompare(String(b.uuid))
+    String(a.uuid).localeCompare(
+      String(b.uuid)
+    )
   );
 
   console.log(
@@ -242,21 +296,30 @@ export async function POST(request) {
   if (relevantJobs.length > 0) {
     const jobRows = relevantJobs.map((j) => ({
       org_id: orgId,
-      job_no: j.generated_job_id || j.uuid,
+      job_no:
+        j.generated_job_id || j.uuid,
       client:
-        companyName[j.company_uuid] || "Unknown client",
+        companyName[j.company_uuid] ||
+        "Unknown client",
       address: j.job_address || null,
       job_date:
         (j.date || "").slice(0, 10) ||
-        new Date().toISOString().slice(0, 10),
+        new Date()
+          .toISOString()
+          .slice(0, 10),
       location_id: mainLoc.id,
       servicem8_job_uuid: j.uuid,
     }));
 
-    const { data: upserted, error: upsertErr } =
-      await admin.rpc("upsert_synced_jobs", {
+    const {
+      data: upserted,
+      error: upsertErr,
+    } = await admin.rpc(
+      "upsert_synced_jobs",
+      {
         p_jobs: jobRows,
-      });
+      }
+    );
 
     if (upsertErr) {
       return NextResponse.json(
@@ -268,10 +331,14 @@ export async function POST(request) {
     }
 
     for (const row of upserted || []) {
-      jobIdByUuid[row.servicem8_job_uuid] = row.id;
+      jobIdByUuid[
+        row.servicem8_job_uuid
+      ] = row.id;
 
       if (
-        preExistingUuids.has(row.servicem8_job_uuid)
+        preExistingUuids.has(
+          row.servicem8_job_uuid
+        )
       ) {
         jobsUpdated++;
       } else {
@@ -292,14 +359,16 @@ export async function POST(request) {
     .map((j) => j.uuid)
     .filter(Boolean);
 
-  const { data: syncState, error: syncStateErr } =
-    await admin
-      .from("servicem8_sync_state")
-      .select(
-        "org_id, job_uuids, next_index, sync_started_at, updated_at"
-      )
-      .eq("org_id", orgId)
-      .maybeSingle();
+  const {
+    data: syncState,
+    error: syncStateErr,
+  } = await admin
+    .from("servicem8_sync_state")
+    .select(
+      "org_id, job_uuids, next_index, sync_started_at, updated_at"
+    )
+    .eq("org_id", orgId)
+    .maybeSingle();
 
   if (syncStateErr) {
     return NextResponse.json(
@@ -310,14 +379,18 @@ export async function POST(request) {
     );
   }
 
-  const savedJobUuids = Array.isArray(syncState?.job_uuids)
+  const savedJobUuids = Array.isArray(
+    syncState?.job_uuids
+  )
     ? syncState.job_uuids
     : [];
 
   const sameJobSet =
-    savedJobUuids.length === allJobUuids.length &&
+    savedJobUuids.length ===
+      allJobUuids.length &&
     savedJobUuids.every(
-      (uuid, index) => uuid === allJobUuids[index]
+      (uuid, index) =>
+        uuid === allJobUuids[index]
     );
 
   let nextIndex = 0;
@@ -348,14 +421,17 @@ export async function POST(request) {
         org_id: orgId,
         job_uuids: [],
         next_index: 0,
-        sync_started_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        sync_started_at:
+          new Date().toISOString(),
+        updated_at:
+          new Date().toISOString(),
       });
 
     await admin
       .from("integrations")
       .update({
-        last_synced_at: new Date().toISOString(),
+        last_synced_at:
+          new Date().toISOString(),
       })
       .eq("id", integration.id);
 
@@ -383,14 +459,18 @@ export async function POST(request) {
   if (!syncState || !sameJobSet) {
     nextIndex = 0;
 
-    const { error: checkpointErr } = await admin
+    const {
+      error: checkpointErr,
+    } = await admin
       .from("servicem8_sync_state")
       .upsert({
         org_id: orgId,
         job_uuids: allJobUuids,
         next_index: 0,
-        sync_started_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        sync_started_at:
+          new Date().toISOString(),
+        updated_at:
+          new Date().toISOString(),
       });
 
     if (checkpointErr) {
@@ -418,7 +498,8 @@ export async function POST(request) {
     batchStart + JOB_BATCH_SIZE
   );
 
-  const batchEnd = batchStart + batchJobUuids.length;
+  const batchEnd =
+    batchStart + batchJobUuids.length;
 
   console.log(
     `[sm8 sync] processing jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length} — ${elapsed()}`
@@ -431,10 +512,11 @@ export async function POST(request) {
   let sm8Materials = [];
 
   try {
-    sm8Materials = await fetchJobMaterialsForJobs(
-      sm8Token,
-      batchJobUuids
-    );
+    sm8Materials =
+      await fetchJobMaterialsForJobs(
+        sm8Token,
+        batchJobUuids
+      );
   } catch (e) {
     // IMPORTANT:
     // We intentionally do NOT advance the checkpoint here.
@@ -453,7 +535,8 @@ export async function POST(request) {
         checkpoint: {
           nextIndex: batchStart,
           totalJobs: allJobUuids.length,
-          jobsAttempted: batchJobUuids.length,
+          jobsAttempted:
+            batchJobUuids.length,
         },
         message:
           "Material sync stopped at the current checkpoint. The next Sync will retry this batch.",
@@ -472,18 +555,24 @@ export async function POST(request) {
 
   const { data: parts } = await admin
     .from("parts")
-    .select("id, sku, part_no, unit_cost")
+    .select(
+      "id, sku, part_no, unit_cost"
+    )
     .eq("org_id", orgId);
 
   const partByKey = {};
 
   for (const p of parts || []) {
     if (p.sku) {
-      partByKey[p.sku.trim().toLowerCase()] = p;
+      partByKey[
+        p.sku.trim().toLowerCase()
+      ] = p;
     }
 
     if (p.part_no) {
-      partByKey[p.part_no.trim().toLowerCase()] = p;
+      partByKey[
+        p.part_no.trim().toLowerCase()
+      ] = p;
     }
   }
 
@@ -491,24 +580,32 @@ export async function POST(request) {
   // LOAD ALREADY PROCESSED MATERIALS
   // ------------------------------------------------------------
 
-  const { data: alreadySyncedLines } = await admin
-    .from("job_line_items")
-    .select("servicem8_material_uuid")
-    .not("servicem8_material_uuid", "is", null);
+  const { data: alreadySyncedLines } =
+    await admin
+      .from("job_line_items")
+      .select("servicem8_material_uuid")
+      .not(
+        "servicem8_material_uuid",
+        "is",
+        null
+      );
 
   const syncedUuids = new Set(
     (alreadySyncedLines || []).map(
-      (l) => l.servicem8_material_uuid
+      (l) =>
+        l.servicem8_material_uuid
     )
   );
 
-  const { data: alreadyFlagged } = await admin
-    .from("unmatched_materials")
-    .select("servicem8_material_uuid");
+  const { data: alreadyFlagged } =
+    await admin
+      .from("unmatched_materials")
+      .select("servicem8_material_uuid");
 
   const flaggedUuids = new Set(
     (alreadyFlagged || []).map(
-      (f) => f.servicem8_material_uuid
+      (f) =>
+        f.servicem8_material_uuid
     )
   );
 
@@ -520,20 +617,52 @@ export async function POST(request) {
   let materialsFlagged = 0;
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
+  let materialsSkippedLabor = 0;
 
-  const totalMaterialsSeen = sm8Materials.length;
+  const totalMaterialsSeen =
+    sm8Materials.length;
 
-  const candidateMaterials = sm8Materials.filter(
-    (m) =>
-      m.uuid &&
-      !syncedUuids.has(m.uuid) &&
-      !flaggedUuids.has(m.uuid)
-  );
+  // ------------------------------------------------------------
+  // IDENTIFY LABOR
+  // ------------------------------------------------------------
+
+  const laborMaterials =
+    sm8Materials.filter((m) =>
+      isLaborItem(m.name)
+    );
+
+  for (const labor of laborMaterials) {
+    materialsSkippedLabor++;
+
+    console.log(
+      `[sm8 sync] skipping labor item: ${labor.name}`
+    );
+  }
+
+  // ------------------------------------------------------------
+  // CANDIDATE MATERIALS
+  // ------------------------------------------------------------
+  //
+  // Labor is excluded here so it never reaches:
+  // - part matching
+  // - inventory deduction
+  // - Needs Review
+  //
+
+  const candidateMaterials =
+    sm8Materials.filter(
+      (m) =>
+        m.uuid &&
+        !syncedUuids.has(m.uuid) &&
+        !flaggedUuids.has(m.uuid) &&
+        !isLaborItem(m.name)
+    );
 
   const materialPayload = [];
 
   for (const m of candidateMaterials) {
-    const jobId = jobIdByUuid[m.job_uuid];
+    const jobId =
+      jobIdByUuid[m.job_uuid];
 
     if (!jobId) {
       materialsSkippedNoJob++;
@@ -557,15 +686,22 @@ export async function POST(request) {
 
     materialPayload.push({
       job_id: jobId,
-      part_id: match ? match.id : null,
-      servicem8_material_uuid: m.uuid,
-      raw_name: m.name || "(unnamed)",
+      part_id: match
+        ? match.id
+        : null,
+      servicem8_material_uuid:
+        m.uuid,
+      raw_name:
+        m.name || "(unnamed)",
       qty,
       unit_cost:
         Number(m.cost) ||
-        (match ? match.unit_cost : 0) ||
+        (match
+          ? match.unit_cost
+          : 0) ||
         0,
-      sale_cost: Number(m.price) || 0,
+      sale_cost:
+        Number(m.price) || 0,
     });
   }
 
@@ -574,14 +710,16 @@ export async function POST(request) {
   // ------------------------------------------------------------
 
   if (materialPayload.length > 0) {
-    const { data: result, error: processErr } =
-      await admin
-        .rpc("process_synced_materials", {
-          p_org_id: orgId,
-          p_location_id: mainLoc.id,
-          p_materials: materialPayload,
-        })
-        .single();
+    const {
+      data: result,
+      error: processErr,
+    } = await admin
+      .rpc("process_synced_materials", {
+        p_org_id: orgId,
+        p_location_id: mainLoc.id,
+        p_materials: materialPayload,
+      })
+      .single();
 
     if (processErr) {
       // IMPORTANT:
@@ -599,8 +737,10 @@ export async function POST(request) {
           retryable: true,
           checkpoint: {
             nextIndex: batchStart,
-            totalJobs: allJobUuids.length,
-            jobsAttempted: batchJobUuids.length,
+            totalJobs:
+              allJobUuids.length,
+            jobsAttempted:
+              batchJobUuids.length,
           },
           message:
             "The checkpoint was not advanced because material processing failed.",
@@ -617,7 +757,7 @@ export async function POST(request) {
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) — ${elapsed()}`
+    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedLabor} labor skipped) — ${elapsed()}`
   );
 
   // ------------------------------------------------------------
@@ -631,18 +771,20 @@ export async function POST(request) {
     ? allJobUuids.length
     : batchEnd;
 
-  const { error: checkpointUpdateErr } =
-    await admin
-      .from("servicem8_sync_state")
-      .upsert({
-        org_id: orgId,
-        job_uuids: allJobUuids,
-        next_index: newNextIndex,
-        sync_started_at:
-          syncState?.sync_started_at ||
-          new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
+  const {
+    error: checkpointUpdateErr,
+  } = await admin
+    .from("servicem8_sync_state")
+    .upsert({
+      org_id: orgId,
+      job_uuids: allJobUuids,
+      next_index: newNextIndex,
+      sync_started_at:
+        syncState?.sync_started_at ||
+        new Date().toISOString(),
+      updated_at:
+        new Date().toISOString(),
+    });
 
   if (checkpointUpdateErr) {
     // IMPORTANT:
@@ -666,7 +808,8 @@ export async function POST(request) {
         materialsFlagged,
         checkpoint: {
           nextIndex: batchStart,
-          totalJobs: allJobUuids.length,
+          totalJobs:
+            allJobUuids.length,
           jobsProcessedThisRun:
             batchJobUuids.length,
         },
@@ -682,7 +825,8 @@ export async function POST(request) {
   await admin
     .from("integrations")
     .update({
-      last_synced_at: new Date().toISOString(),
+      last_synced_at:
+        new Date().toISOString(),
     })
     .eq("id", integration.id);
 
@@ -694,8 +838,8 @@ export async function POST(request) {
     org_id: orgId,
     user_id: userData.user.id,
     message: syncComplete
-      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review.`
-      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review.`,
+      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedLabor} labor item(s) skipped.`
+      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedLabor} labor item(s) skipped.`,
   });
 
   // ------------------------------------------------------------
@@ -714,13 +858,16 @@ export async function POST(request) {
     materialsFlagged,
 
     checkpoint: {
-      processedFrom: batchStart + 1,
+      processedFrom:
+        batchStart + 1,
       processedTo: batchEnd,
       nextIndex: newNextIndex,
-      totalJobs: allJobUuids.length,
+      totalJobs:
+        allJobUuids.length,
       remainingJobs: Math.max(
         0,
-        allJobUuids.length - newNextIndex
+        allJobUuids.length -
+          newNextIndex
       ),
     },
 
@@ -732,12 +879,14 @@ export async function POST(request) {
       totalMaterialsSeen,
       materialsSkippedNoJob,
       materialsSkippedNoQty,
+      materialsSkippedLabor,
       batchSize: JOB_BATCH_SIZE,
       elapsed: elapsed(),
 
       // Temporary diagnostic data.
       // Remove this later once material matching is confirmed.
-      sampleRawMaterials: sm8Materials.slice(0, 3),
+      sampleRawMaterials:
+        sm8Materials.slice(0, 3),
     },
   });
 }
