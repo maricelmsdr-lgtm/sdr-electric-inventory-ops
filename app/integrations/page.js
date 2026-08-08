@@ -278,6 +278,18 @@ function IntegrationsPageInner() {
     }
 
     await supabase.from("unmatched_materials").update({ status: "resolved", resolved_part_id: partId }).eq("id", row.id);
+
+    // Remember this mapping so the exact same ServiceM8 material name
+    // auto-matches on future syncs instead of landing back in Needs Review.
+    if (row.raw_name) {
+      await supabase
+        .from("part_aliases")
+        .upsert(
+          { org_id: orgId, alias_name: row.raw_name.trim().toLowerCase(), part_id: partId },
+          { onConflict: "org_id,alias_name" }
+        );
+    }
+
     await logActivity(`Resolved ServiceM8 material "${row.raw_name}" → part, deducted ${row.qty} from stock`);
     await fetchUnmatched();
     await fetchParts();
