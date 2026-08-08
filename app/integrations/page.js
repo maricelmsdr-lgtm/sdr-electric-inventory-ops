@@ -132,75 +132,107 @@ function IntegrationsPageInner() {
   const connectServiceM8 = async () => {
     setBusyKey("servicem8");
     setError("");
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) {
-      setError("Your session expired — please refresh and try again.");
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        setError("Your session expired — please refresh and try again.");
+        return;
+      }
+      const res = await fetch("/api/integrations/servicem8/connect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: session.access_token }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.url) {
+        setError(body.error || "Couldn't start the ServiceM8 connection.");
+        return;
+      }
+      window.location.href = body.url;
+    } catch {
+      setError("Something went wrong starting the ServiceM8 connection.");
+    } finally {
       setBusyKey(null);
-      return;
     }
-    const res = await fetch("/api/integrations/servicem8/connect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ access_token: session.access_token }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || !body.url) {
-      setError(body.error || "Couldn't start the ServiceM8 connection.");
-      setBusyKey(null);
-      return;
-    }
-    window.location.href = body.url;
   };
 
   const disconnectServiceM8 = async () => {
     setBusyKey("servicem8");
     setError("");
-    const { data: { session } } = await supabase.auth.getSession();
-    const res = await fetch("/api/integrations/servicem8/disconnect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ access_token: session?.access_token }),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      setError(body.error || "Failed to disconnect ServiceM8.");
-    } else {
-      await fetchIntegrations();
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/integrations/servicem8/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: session?.access_token }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.error || "Failed to disconnect ServiceM8.");
+      } else {
+        await fetchIntegrations();
+      }
+    } catch {
+      setError("Something went wrong disconnecting ServiceM8.");
+    } finally {
+      setBusyKey(null);
     }
-    setBusyKey(null);
   };
 
   const syncServiceM8 = async () => {
     setSyncing(true);
     setError("");
     setNotice("");
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) {
-      setError("Your session expired — please refresh and try again.");
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        setError("Your session expired — please refresh and try again.");
+        return;
+      }
+      // Safety net: if the server ever hangs instead of responding with an
+      // error, don't leave the button stuck on "Syncing..." forever.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 90_000);
+      let res;
+      try {
+        res = await fetch("/api/integrations/servicem8/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ access_token: session.access_token }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        // A 504 means the platform's gateway killed the request before our
+        // route could respond at all — that's why body.error is empty (there
+        // was no JSON response to read an error from). Distinguish it from a
+        // real server-side error so this doesn't just say "Sync failed."
+        // with no explanation.
+        if (res.status === 504) {
+          setError("Sync timed out before finishing — this can happen with a large batch of jobs/materials. Try again; if it keeps happening, it may need a smaller sync window.");
+        } else {
+          setError(body.error || `Sync failed (status ${res.status}).`);
+        }
+      } else {
+        setNotice(
+          `Synced: ${body.jobsCreated} new job(s), ${body.jobsUpdated} updated, ${body.materialsDeducted} material(s) deducted` +
+            (body.materialsFlagged ? `, ${body.materialsFlagged} flagged for review below.` : ".") +
+            (body.diagnostics
+              ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
+              : "")
+        );
+        setRawDebug(body.diagnostics?.sampleRawMaterials || null);
+        await fetchIntegrations();
+        await fetchUnmatched();
+      }
+    } catch (e) {
+      setError(e.name === "AbortError" ? "Sync timed out — try again in a minute." : "Something went wrong while syncing.");
+    } finally {
       setSyncing(false);
-      return;
     }
-    const res = await fetch("/api/integrations/servicem8/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ access_token: session.access_token }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || !body.ok) {
-      setError(body.error || "Sync failed.");
-    } else {
-      setNotice(
-        `Synced: ${body.jobsCreated} new job(s), ${body.jobsUpdated} updated, ${body.materialsDeducted} material(s) deducted` +
-          (body.materialsFlagged ? `, ${body.materialsFlagged} flagged for review below.` : ".") +
-          (body.diagnostics
-            ? ` [debug: ${body.diagnostics.totalMaterialsSeen} materials seen in ServiceM8, ${body.diagnostics.materialsSkippedNoJob} skipped (no matching job), ${body.diagnostics.materialsSkippedNoQty} skipped (no quantity)]`
-            : "")
-      );
-      setRawDebug(body.diagnostics?.sampleRawMaterials || null);
-      await fetchIntegrations();
-      await fetchUnmatched();
-    }
-    setSyncing(false);
   };
 
   // Resolving an unmatched material: assign it to a real part, deduct

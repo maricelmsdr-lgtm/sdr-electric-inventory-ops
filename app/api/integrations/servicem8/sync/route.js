@@ -66,9 +66,18 @@ export async function POST(request) {
     return NextResponse.json({ error: "No Main Warehouse location found for this org — set one up before syncing." }, { status: 400 });
   }
 
+  // Only pull recent/active work — not the company's entire ServiceM8
+  // history. Materials from a job finished years ago aren't relevant to
+  // today's stock levels, and pulling everything makes each sync slow
+  // and easy to exceed the function's time limit.
+  const SYNC_WINDOW_DAYS = 90;
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - SYNC_WINDOW_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
   let sm8Jobs, sm8Companies;
   try {
-    [sm8Jobs, sm8Companies] = await Promise.all([fetchJobs(sm8Token), fetchCompanies(sm8Token)]);
+    [sm8Jobs, sm8Companies] = await Promise.all([fetchJobs(sm8Token, cutoffStr), fetchCompanies(sm8Token)]);
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
@@ -101,29 +110,39 @@ export async function POST(request) {
     .not("servicem8_job_uuid", "is", null);
   const jobIdByUuid = Object.fromEntries((existingJobs || []).map((j) => [j.servicem8_job_uuid, j.id]));
 
+  // Job upserts hit Supabase, not ServiceM8, so there's no external rate
+  // limit to respect here — running them in small concurrent batches
+  // (rather than one at a time) cuts a meaningful chunk of wall-clock time
+  // off large syncs, same idea as the materials fetch below.
+  const JOB_UPSERT_BATCH_SIZE = 10;
   let jobsCreated = 0;
   let jobsUpdated = 0;
-  for (const j of relevantJobs) {
-    const row = {
-      org_id: profile.org_id,
-      job_no: j.generated_job_id || j.uuid,
-      client: companyName[j.company_uuid] || "Unknown client",
-      address: j.job_address || null,
-      job_date: (j.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10),
-      location_id: mainLoc.id,
-      servicem8_job_uuid: j.uuid,
-      synced_from_servicem8: true,
-    };
-    if (jobIdByUuid[j.uuid]) {
-      await admin.from("jobs").update(row).eq("id", jobIdByUuid[j.uuid]);
-      jobsUpdated++;
-    } else {
-      const { data: inserted, error: insErr } = await admin.from("jobs").insert(row).select("id").single();
-      if (!insErr && inserted) {
-        jobIdByUuid[j.uuid] = inserted.id;
-        jobsCreated++;
-      }
-    }
+  for (let i = 0; i < relevantJobs.length; i += JOB_UPSERT_BATCH_SIZE) {
+    const batch = relevantJobs.slice(i, i + JOB_UPSERT_BATCH_SIZE);
+    await Promise.all(
+      batch.map(async (j) => {
+        const row = {
+          org_id: profile.org_id,
+          job_no: j.generated_job_id || j.uuid,
+          client: companyName[j.company_uuid] || "Unknown client",
+          address: j.job_address || null,
+          job_date: (j.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10),
+          location_id: mainLoc.id,
+          servicem8_job_uuid: j.uuid,
+          synced_from_servicem8: true,
+        };
+        if (jobIdByUuid[j.uuid]) {
+          await admin.from("jobs").update(row).eq("id", jobIdByUuid[j.uuid]);
+          jobsUpdated++;
+        } else {
+          const { data: inserted, error: insErr } = await admin.from("jobs").insert(row).select("id").single();
+          if (!insErr && inserted) {
+            jobIdByUuid[j.uuid] = inserted.id;
+            jobsCreated++;
+          }
+        }
+      })
+    );
   }
 
   // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query —
