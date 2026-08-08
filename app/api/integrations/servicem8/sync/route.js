@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJobs, fetchCompanies } from "@/lib/servicem8";
+import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJobs, fetchCompanies, fetchMaterialsCatalog } from "@/lib/servicem8";
 
 // Retrying through a rate limit can take a while (see sm8Fetch's backoff),
 // so give this route more room than the default 10s.
@@ -13,6 +13,9 @@ export const maxDuration = 60;
 // stock on hand, is written to unmatched_materials for manual review
 // instead of silently failing or going negative.
 export async function POST(request) {
+  const t0 = Date.now();
+  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+
   const { access_token } = await request.json().catch(() => ({}));
   if (!access_token) {
     return NextResponse.json({ error: "Missing session." }, { status: 401 });
@@ -81,6 +84,7 @@ export async function POST(request) {
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
+  console.log(`[sm8 sync] fetched ${sm8Jobs?.length ?? 0} jobs, ${sm8Companies?.length ?? 0} companies — ${elapsed()}`);
 
   const companyName = {};
   for (const c of sm8Companies || []) companyName[c.uuid] = c.name;
@@ -109,11 +113,17 @@ export async function POST(request) {
     .eq("org_id", profile.org_id)
     .not("servicem8_job_uuid", "is", null);
   const jobIdByUuid = Object.fromEntries((existingJobs || []).map((j) => [j.servicem8_job_uuid, j.id]));
+  const preExistingUuids = new Set(Object.keys(jobIdByUuid));
 
+  // Upsert every job in ONE call instead of one HTTP round trip per job —
+  // with a few hundred jobs in a 90-day window, that per-row approach was
+  // most of what blew past Vercel's 60s limit (confirmed via the Vercel
+  // function logs: a long list of individual POST requests to Supabase).
+  // See supabase/007_bulk_sync_functions.sql.
   let jobsCreated = 0;
   let jobsUpdated = 0;
-  for (const j of relevantJobs) {
-    const row = {
+  if (relevantJobs.length > 0) {
+    const jobRows = relevantJobs.map((j) => ({
       org_id: profile.org_id,
       job_no: j.generated_job_id || j.uuid,
       client: companyName[j.company_uuid] || "Unknown client",
@@ -121,46 +131,64 @@ export async function POST(request) {
       job_date: (j.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10),
       location_id: mainLoc.id,
       servicem8_job_uuid: j.uuid,
-      synced_from_servicem8: true,
-    };
-    if (jobIdByUuid[j.uuid]) {
-      await admin.from("jobs").update(row).eq("id", jobIdByUuid[j.uuid]);
-      jobsUpdated++;
-    } else {
-      const { data: inserted, error: insErr } = await admin.from("jobs").insert(row).select("id").single();
-      if (!insErr && inserted) {
-        jobIdByUuid[j.uuid] = inserted.id;
-        jobsCreated++;
-      }
+    }));
+    const { data: upserted, error: upsertErr } = await admin.rpc("upsert_synced_jobs", { p_jobs: jobRows });
+    if (upsertErr) {
+      return NextResponse.json({ error: `Job upsert failed: ${upsertErr.message}` }, { status: 500 });
+    }
+    for (const row of upserted || []) {
+      jobIdByUuid[row.servicem8_job_uuid] = row.id;
+      if (preExistingUuids.has(row.servicem8_job_uuid)) jobsUpdated++;
+      else jobsCreated++;
     }
   }
+  console.log(`[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`);
 
   // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query —
-  // an unfiltered bulk call doesn't reliably return everything). Done
-  // sequentially with a small pause between calls to stay under ServiceM8's
-  // per-minute rate limit — firing one request per job all at once trips it
-  // as soon as there's more than a few jobs.
+  // an unfiltered bulk call doesn't reliably return everything). Done in
+  // small concurrent batches (see fetchJobMaterialsForJobs) to stay under
+  // ServiceM8's per-minute rate limit while still finishing well inside the
+  // route's time limit.
   let sm8Materials = [];
   try {
     sm8Materials = await fetchJobMaterialsForJobs(sm8Token, Object.keys(jobIdByUuid));
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
+  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs — ${elapsed()}`);
 
-  // Match materials to the parts catalog by SKU or part number
-  // (case-insensitive, exact match on the ServiceM8 material name), plus
-  // any names previously taught via manual resolution in Needs Review.
-  const [{ data: parts }, { data: aliases }] = await Promise.all([
-    admin.from("parts").select("id, sku, part_no, unit_cost").eq("org_id", profile.org_id),
-    admin.from("part_aliases").select("alias_name, part_id, parts(id, sku, part_no, unit_cost)").eq("org_id", profile.org_id),
-  ]);
+  // Match materials to the parts catalog. Prefer matching on ServiceM8's own
+  // catalog item CODE (via material_uuid → material.json) — that's the real
+  // part number, e.g. "TYWRAP8MOUNTBLK" — over the job material's "name"
+  // field, which is a human-readable description ("TYWRAP 8 BLACK WITH
+  // MOUNTING HOLE") that will almost never equal a SKU/part_no exactly.
+  //
+  // The catalog fetch needs the read_inventory scope, only just added — an
+  // org connected before this update will 403 here until they disconnect +
+  // reconnect ServiceM8. That's not fatal: fall back to name-only matching
+  // (the old behavior) so sync still works, just less precisely, until
+  // they reconnect.
+  let sm8MaterialsCatalog = [];
+  let catalogAvailable = true;
+  try {
+    sm8MaterialsCatalog = await fetchMaterialsCatalog(sm8Token);
+  } catch (e) {
+    catalogAvailable = false;
+    console.log(`[sm8 sync] materials catalog unavailable (probably needs reconnect for read_inventory scope): ${e.message}`);
+  }
+  const catalogByUuid = {};
+  for (const c of sm8MaterialsCatalog || []) catalogByUuid[c.uuid] = c;
+  console.log(`[sm8 sync] materials catalog: ${sm8MaterialsCatalog.length} items, available=${catalogAvailable}`);
+  if (sm8MaterialsCatalog.length > 0) console.log(`[sm8 sync] sample catalog item: ${JSON.stringify(sm8MaterialsCatalog[0])}`);
+
+  const { data: parts } = await admin
+    .from("parts")
+    .select("id, sku, part_no, unit_cost")
+    .eq("org_id", profile.org_id);
   const partByKey = {};
   for (const p of parts || []) {
     if (p.sku) partByKey[p.sku.trim().toLowerCase()] = p;
     if (p.part_no) partByKey[p.part_no.trim().toLowerCase()] = p;
-  }
-  for (const a of aliases || []) {
-    if (a.alias_name && a.parts) partByKey[a.alias_name.trim().toLowerCase()] = a.parts;
   }
 
   const { data: alreadySyncedLines } = await admin
@@ -172,108 +200,73 @@ export async function POST(request) {
   const { data: alreadyFlagged } = await admin.from("unmatched_materials").select("servicem8_material_uuid");
   const flaggedUuids = new Set((alreadyFlagged || []).map((f) => f.servicem8_material_uuid));
 
+  // Match materials to the parts catalog by SKU or part number in memory
+  // (cheap — no network cost), then hand the whole resolved batch to
+  // Postgres in ONE call instead of one HTTP round trip per material line.
+  // With a few hundred material lines, that per-row approach (even
+  // "concurrent" in small batches) was the dominant cost — confirmed via
+  // Vercel's function logs showing a long list of individual POST requests
+  // to Supabase. See supabase/007_bulk_sync_functions.sql.
   let materialsDeducted = 0;
   let materialsFlagged = 0;
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
-  let materialsNonInventory = 0;
   const totalMaterialsSeen = (sm8Materials || []).length;
 
-  // ServiceM8's Job Materials list mixes real inventory parts with labor
-  // and service charges ("Technician Labour", "SERVICE CALL FEE / TRUCK
-  // CHARGE", etc). Those aren't materials to match against the parts
-  // catalog or deduct stock for — but they're still real invoice line
-  // items, so we record them on the job with no linked part instead of
-  // silently dropping them or flagging them as "no matching part found".
-  const NON_INVENTORY_PATTERN = /\b(labou?r|technician|apprentice|service\s?(call|rate)|truck charge|call[\s-]?out|call[\s-]?back|travel time|site visit|diagnostic fee|trip charge|mileage|warranty\s?(service|call|visit|callback)|after[\s-]?installation|rental)\b|project[\s-]?based material/i;
+  const candidateMaterials = (sm8Materials || []).filter(
+    (m) => m.uuid && !syncedUuids.has(m.uuid) && !flaggedUuids.has(m.uuid)
+  );
 
-  for (const m of sm8Materials || []) {
-    if (!m.uuid || syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) continue;
-
+  const materialPayload = [];
+  for (const m of candidateMaterials) {
     const jobId = jobIdByUuid[m.job_uuid];
-    if (!jobId) { materialsSkippedNoJob++; continue; } // material belongs to a job we didn't pull (quote/cancelled) — skip
+    if (!jobId) { materialsSkippedNoJob++; continue; } // material belongs to a job we didn't pull (quote/cancelled)
 
     const qty = Number(m.quantity ?? m.qty ?? 0);
     if (!qty) { materialsSkippedNoQty++; continue; }
 
-    // "Project based Materials" is ServiceM8's own generic bundle label, not
-    // a specific item — and a material with no name at all has nothing a
-    // human could search the parts catalog for anyway. Both get recorded
-    // as a non-inventory line (preserving the dollar value for invoicing)
-    // instead of cluttering Needs Review with something unresolvable.
-    if (!m.name?.trim() || NON_INVENTORY_PATTERN.test(m.name)) {
-      await admin.from("job_line_items").insert({
-        job_id: jobId,
-        part_id: null,
-        qty: Math.max(1, Math.round(qty)),
-        part_cost: 0,
-        sale_cost: Number(m.price) || 0,
-        servicem8_material_uuid: m.uuid,
-      });
-      materialsNonInventory++;
-      continue;
-    }
+    const catalogItem = catalogByUuid[m.material_uuid];
+    // Field name guessed defensively since we haven't seen a live payload
+    // yet — sampleRawMaterialsCatalog in the response below will confirm
+    // the real one if this needs adjusting.
+    const catalogCode = (catalogItem?.code || catalogItem?.item_number || catalogItem?.sku || catalogItem?.field1 || "")
+      .toString().trim().toLowerCase();
+    const nameKey = (m.name || "").trim().toLowerCase();
+    const match = (catalogCode && partByKey[catalogCode]) || partByKey[nameKey];
 
-    const key = (m.name || "").trim().toLowerCase();
-    const match = partByKey[key];
-
-    if (!match) {
-      await admin.from("unmatched_materials").insert({
-        org_id: profile.org_id,
-        job_id: jobId,
-        servicem8_material_uuid: m.uuid,
-        raw_name: m.name || "(unnamed)",
-        qty,
-        unit_cost: Number(m.cost) || 0,
-        reason: "no_match",
-      });
-      materialsFlagged++;
-      continue;
-    }
-
-    // Inventory is allowed to go negative (a job's parts were genuinely
-    // used whether or not stock caught up yet — see inventory_balances'
-    // dropped chk_balance_quantity/chk_inventory_value constraints), so
-    // this should now only fail for a genuine, unexpected DB error — not
-    // for insufficient stock. Flag it for review rather than silently
-    // dropping the material if it ever does.
-    const { error: rpcErr } = await admin.rpc("apply_inventory_qty_change", {
-      p_org_id: profile.org_id,
-      p_part_id: match.id,
-      p_location_id: mainLoc.id,
-      p_delta: -qty,
-    });
-
-    if (rpcErr) {
-      await admin.from("unmatched_materials").insert({
-        org_id: profile.org_id,
-        job_id: jobId,
-        servicem8_material_uuid: m.uuid,
-        raw_name: m.name || "(unnamed)",
-        qty,
-        unit_cost: Number(m.cost) || 0,
-        reason: "insufficient_stock",
-      });
-      materialsFlagged++;
-      continue;
-    }
-
-    await admin.from("job_line_items").insert({
+    materialPayload.push({
       job_id: jobId,
-      part_id: match.id,
-      qty,
-      part_cost: Number(m.cost) || match.unit_cost || 0,
-      sale_cost: Number(m.price) || 0,
+      part_id: match ? match.id : null,
       servicem8_material_uuid: m.uuid,
+      raw_name: m.name || "(unnamed)",
+      qty,
+      unit_cost: Number(m.cost) || (match ? match.unit_cost : 0) || 0,
+      sale_cost: Number(m.price) || 0,
     });
-    materialsDeducted++;
   }
+
+  if (materialPayload.length > 0) {
+    const { data: result, error: processErr } = await admin
+      .rpc("process_synced_materials", {
+        p_org_id: profile.org_id,
+        p_location_id: mainLoc.id,
+        p_materials: materialPayload,
+      })
+      .single();
+    if (processErr) {
+      return NextResponse.json({ error: `Material processing failed: ${processErr.message}` }, { status: 500 });
+    }
+    materialsDeducted = result?.deducted_count || 0;
+    materialsFlagged = result?.flagged_count || 0;
+  }
+
+  console.log(`[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) — ${elapsed()}`);
 
   await admin.from("integrations").update({ last_synced_at: new Date().toISOString() }).eq("id", integration.id);
   await admin.from("activity_log").insert({
     org_id: profile.org_id,
     user_id: userData.user.id,
-    message: `Synced ServiceM8: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsNonInventory} labor/service charge(s) recorded, ${materialsFlagged} flagged for review.`,
+    message: `Synced ServiceM8: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review.`,
   });
 
   return NextResponse.json({
@@ -281,7 +274,6 @@ export async function POST(request) {
     jobsCreated,
     jobsUpdated,
     materialsDeducted,
-    materialsNonInventory,
     materialsFlagged,
     diagnostics: {
       totalMaterialsSeen,
@@ -291,6 +283,8 @@ export async function POST(request) {
       // see real field names instead of guessing against docs. Remove once
       // matching is confirmed working.
       sampleRawMaterials: (sm8Materials || []).slice(0, 3),
+      sampleRawMaterialsCatalog: (sm8MaterialsCatalog || []).slice(0, 3),
+      catalogAvailable,
     },
   });
 }

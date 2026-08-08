@@ -2,9 +2,13 @@ import { NextResponse } from "next/server";
 import { randomBytes } from "crypto";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
-// Read-only-ish scopes to start. Add manage_/create_ scopes later once we
-// build the actual data sync (pulling jobs, pushing parts usage, etc).
-const SCOPES = "vendor read_customers read_jobs read_job_materials";
+// read_inventory added so the sync can look up ServiceM8's materials
+// catalog (item codes like "TYWRAP8MOUNTBLK") — job material lines only
+// carry a human-readable name plus a reference (material_uuid) to the
+// catalog entry, so without this scope we can only match on that name,
+// which rarely equals a part number/SKU exactly. Anyone already connected
+// needs to disconnect + reconnect once to grant this new permission.
+const SCOPES = "vendor read_customers read_jobs read_job_materials read_inventory";
 
 // POST (not GET) so the user's session token travels in the request body,
 // never in the URL — a URL-based token risks leaking via server access

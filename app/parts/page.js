@@ -12,23 +12,24 @@ import {
 
 const emptyPart = { part_no: "", sku: "", category: "Electrical", location: "", min_reorder: 0, unit_cost: 0, description: "", photo_path: null };
 const CATEGORIES = ["Electrical", "Plumbing", "HVAC", "General"];
+const PAGE_SIZE = 200;
 
 export default function PartsPage() {
   const router = useRouter();
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [parts, setParts] = useState([]);
-  const [totalPartsCount, setTotalPartsCount] = useState(0);
-  const [lowStockCount, setLowStockCount] = useState(0);
+  const [matchCount, setMatchCount] = useState(0); // total rows matching current search (may exceed what's loaded)
+  const [lowStockCount, setLowStockCount] = useState(0); // accurate org-wide count, independent of search/page
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [lowStockOnly, setLowStockOnly] = useState(false);
   const [modal, setModal] = useState(null); // { mode: 'create'|'edit', data }
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [locModal, setLocModal] = useState(null); // { part, rows }
   const [error, setError] = useState("");
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
-
-  const PAGE_SIZE = 200;
 
   // Auth guard + load profile/org
   useEffect(() => {
@@ -48,43 +49,59 @@ export default function PartsPage() {
     })();
   }, [router]);
 
-  // Load parts once we know the org, and re-run on every search change —
-  // debounced so we're not firing a query per keystroke. The catalog can be
-  // thousands of rows (real distributor imports easily run 5,000-10,000+),
-  // so this always searches/paginates on the server rather than loading
-  // everything into the browser and filtering client-side.
+  // Debounce search input so we don't fire a query per keystroke against
+  // a 9,700+ row catalog.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q.trim()), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  // Re-query the server whenever org, search term, or the low-stock toggle changes.
   useEffect(() => {
     if (!orgId) return;
-    const timeout = setTimeout(() => fetchParts(), q ? 300 : 0);
-    return () => clearTimeout(timeout);
-  }, [orgId, q]);
+    fetchParts();
+  }, [orgId, debouncedQ, lowStockOnly]);
+
+  // The header "N LOW STOCK" badge is org-wide and independent of the
+  // current search/filter, so it's fetched separately as an exact count.
+  useEffect(() => {
+    if (!orgId) return;
+    fetchLowStockCount();
+  }, [orgId]);
 
   const fetchParts = async () => {
     setLoading(true);
-    let query = supabase.from("parts").select("*").eq("org_id", orgId);
-    if (q.trim()) {
-      const term = q.trim().replace(/[%,]/g, "");
-      query = query.or(`part_no.ilike.%${term}%,sku.ilike.%${term}%,category.ilike.%${term}%,location.ilike.%${term}%`);
-    }
-    const { data, error } = await query.order("part_no").limit(PAGE_SIZE);
-    if (error) setError(error.message);
-    else setParts(data || []);
-    setLoading(false);
-
-    // Accurate counts via head queries — never derived from the (possibly
-    // truncated) array above.
-    const { count: total } = await supabase
+    setError("");
+    let query = supabase
       .from("parts")
-      .select("id", { count: "exact", head: true })
+      .select("*", { count: "exact" })
       .eq("org_id", orgId);
-    setTotalPartsCount(total ?? 0);
 
-    const { count: low } = await supabase
+    if (lowStockOnly) query = query.eq("is_low_stock", true);
+
+    if (debouncedQ) {
+      const term = debouncedQ.replace(/[%,]/g, "\\$&");
+      query = query.or(
+        `part_no.ilike.%${term}%,sku.ilike.%${term}%,location.ilike.%${term}%,description.ilike.%${term}%,category.ilike.%${term}%`
+      );
+    }
+
+    const { data, error, count } = await query.order("part_no").limit(PAGE_SIZE);
+    if (error) setError(error.message);
+    else {
+      setParts(data || []);
+      setMatchCount(count ?? (data || []).length);
+    }
+    setLoading(false);
+  };
+
+  const fetchLowStockCount = async () => {
+    const { count, error } = await supabase
       .from("parts")
       .select("id", { count: "exact", head: true })
       .eq("org_id", orgId)
-      .filter("qty", "lte", "min_reorder");
-    setLowStockCount(low ?? 0);
+      .eq("is_low_stock", true);
+    if (!error) setLowStockCount(count ?? 0);
   };
 
   const openCreate = () => setModal({ mode: "create", data: { ...emptyPart } });
@@ -114,13 +131,16 @@ export default function PartsPage() {
       if (error) { setError(error.message); return; }
       await logActivity(`Added part ${d.part_no} — ${d.sku}`);
     } else {
-      const { id, qty, ...rest } = d; // qty is derived from inventory_balances — never written directly
+      // qty is derived from inventory_balances and is_low_stock is a generated
+      // column — Postgres rejects writes to either, so both are stripped here.
+      const { id, qty, is_low_stock, ...rest } = d;
       const { error } = await supabase.from("parts").update(rest).eq("id", id);
       if (error) { setError(error.message); return; }
       await logActivity(`Updated part ${d.part_no}`);
     }
     setModal(null);
     fetchParts();
+    fetchLowStockCount();
   };
 
   const remove = async () => {
@@ -128,6 +148,7 @@ export default function PartsPage() {
     if (!error) await logActivity(`Deleted part ${confirmDelete.part_no}`);
     setConfirmDelete(null);
     fetchParts();
+    fetchLowStockCount();
   };
 
   const logActivity = async (message) => {
@@ -161,29 +182,42 @@ export default function PartsPage() {
       title="Parts Catalog"
       right={
         lowStockCount > 0 && (
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] f-mono text-red-400 bg-red-500/10 border border-red-500/30 px-2.5 py-1.5 rounded">
+          <button
+            onClick={() => setLowStockOnly((v) => !v)}
+            className={`hidden sm:flex items-center gap-1.5 text-[11px] f-mono px-2.5 py-1.5 rounded border ${
+              lowStockOnly
+                ? "text-red-300 bg-red-500/20 border-red-500/50"
+                : "text-red-400 bg-red-500/10 border-red-500/30 hover:bg-red-500/15"
+            }`}
+            title="Toggle low-stock-only filter"
+          >
             <AlertTriangle size={12} /> {lowStockCount} LOW STOCK
-          </div>
+          </button>
         )
       }
     >
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-          <SearchInput value={q} onChange={setQ} placeholder="Search part no, SKU, location..." />
+          <div className="flex items-center gap-2 flex-wrap">
+            <SearchInput value={q} onChange={setQ} placeholder="Search part no, SKU, location..." />
+            {lowStockOnly && (
+              <button
+                onClick={() => setLowStockOnly(false)}
+                className="text-[11px] f-mono text-red-300 bg-red-500/10 border border-red-500/30 px-2 py-1.5 rounded hover:bg-red-500/15"
+              >
+                Low stock only ✕
+              </button>
+            )}
+          </div>
           <PrimaryBtn onClick={openCreate}><Plus size={15} /> Add Part</PrimaryBtn>
         </div>
 
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
 
         <Panel title="Parts Catalog" icon={Package}>
-          {!loading && !q && totalPartsCount > parts.length && (
-            <div className="text-xs text-slate-500 px-1 pb-3">
-              Showing the first {parts.length} of {totalPartsCount} parts, A–Z. Search to find a specific one.
-            </div>
-          )}
-          {!loading && q && parts.length === PAGE_SIZE && (
-            <div className="text-xs text-slate-500 px-1 pb-3">
-              Showing the first {PAGE_SIZE} matches — refine your search for more specific results.
+          {matchCount > parts.length && (
+            <div className="text-xs text-slate-500 mb-3">
+              Showing the first {parts.length} of {matchCount} matching parts — refine your search to narrow further.
             </div>
           )}
           {loading ? (
@@ -230,7 +264,11 @@ export default function PartsPage() {
                     </tr>
                   ))}
                   {parts.length === 0 && (
-                    <tr><Td colSpan={8} className="text-slate-500">{q ? "No parts match your search." : "No parts yet — add your first one above."}</Td></tr>
+                    <tr>
+                      <Td colSpan={8} className="text-slate-500">
+                        {debouncedQ || lowStockOnly ? "No parts match your search." : "No parts yet — add your first one above."}
+                      </Td>
+                    </tr>
                   )}
                 </tbody>
               </table>
