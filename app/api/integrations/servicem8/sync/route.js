@@ -7,17 +7,36 @@ import {
   fetchCompanies,
 } from "@/lib/servicem8";
 
-// ------------------------------------------------------------
-// CONFIG
-// ------------------------------------------------------------
-
+// Retrying through a rate limit can take a while.
 export const maxDuration = 60;
 
 const JOB_BATCH_SIZE = 10;
 const SYNC_WINDOW_DAYS = 14;
 
 // ------------------------------------------------------------
-// HELPERS
+// NON-INVENTORY DETECTION
+// ------------------------------------------------------------
+//
+// ServiceM8 "Job Materials" contains more than physical parts.
+//
+// Some entries are:
+//
+// - Labor / Labour
+// - Technician hours
+// - After-hours labor
+// - Truck charges
+// - Service call fees
+// - Service rates
+// - Other service charges
+//
+// These are BILLING ITEMS, NOT INVENTORY.
+//
+// They must NEVER:
+// - be matched against SDR parts
+// - be deducted from stock
+// - be sent to Needs Review
+// - be sent to process_synced_materials
+//
 // ------------------------------------------------------------
 
 function isNonInventoryItem(name) {
@@ -25,62 +44,111 @@ function isNonInventoryItem(name) {
     .trim()
     .toLowerCase();
 
-  if (!value) return false;
+  if (!value) {
+    return false;
+  }
 
-  const patterns = [
-    // LABOUR / LABOR
-    /\blabou?r\b/,
+  // ----------------------------------------------------------
+  // LABOR / LABOUR
+  // ----------------------------------------------------------
 
-    // TECHNICIAN / APPRENTICE
-    /\btechnician\b/,
-    /\bapprentice\b/,
+  if (/\blabou?r\b/i.test(value)) {
+    return true;
+  }
 
-    // TIME / HOURS
-    /\bhour\b/,
-    /\bhours\b/,
-    /\bhr\b/,
-    /\bhrs\b/,
+  // ----------------------------------------------------------
+  // HOURS / HOUR
+  // ----------------------------------------------------------
 
-    // TRUCK CHARGES
-    /\btruck\s+charge\b/,
-    /\btruck\s+fee\b/,
-    /\btruck\s+cost\b/,
+  if (/\bhours?\b/i.test(value)) {
+    return true;
+  }
 
-    // SERVICE CALL
-    /\bservice\s+call\s+fee\b/,
-    /\bservice\s+call\s+charge\b/,
-    /\bservice\s+call\b/,
+  // ----------------------------------------------------------
+  // HR / HRS
+  //
+  // Handles:
+  // 2Hr
+  // 2 Hrs
+  // 2 HR
+  // 2 HRS
+  // ----------------------------------------------------------
 
-    // CALL OUT
-    /\bcall\s*out\s+fee\b/,
-    /\bcall\s*out\s+charge\b/,
-    /\bcall\s*out\b/,
+  if (/(?:^|[^a-z])(?:\d+\s*)?hrs?\b/i.test(value)) {
+    return true;
+  }
 
-    // SERVICE FEES
-    /\bservice\s+fee\b/,
-    /\bservice\s+charge\b/,
+  // ----------------------------------------------------------
+  // TRUCK CHARGES
+  // ----------------------------------------------------------
 
-    // TRIP FEES
-    /\btrip\s+fee\b/,
-    /\btrip\s+charge\b/,
+  if (value.includes("truck charge")) {
+    return true;
+  }
 
-    // TRAVEL
-    /\btravel\s+fee\b/,
-    /\btravel\s+charge\b/,
-  ];
+  if (value.includes("truck charges")) {
+    return true;
+  }
 
-  return patterns.some((pattern) =>
-    pattern.test(value)
-  );
+  // ----------------------------------------------------------
+  // SERVICE CALL / SERVICE CHARGES
+  // ----------------------------------------------------------
+
+  if (value.includes("service call fee")) {
+    return true;
+  }
+
+  if (value.includes("service call charge")) {
+    return true;
+  }
+
+  if (value.includes("service charge")) {
+    return true;
+  }
+
+  if (value.includes("service charges")) {
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // SERVICE RATE
+  // ----------------------------------------------------------
+
+  if (value.includes("service rate")) {
+    return true;
+  }
+
+  // ----------------------------------------------------------
+  // OTHER COMMON NON-INVENTORY BILLING ITEMS
+  // ----------------------------------------------------------
+  //
+  // These are intentionally limited to clearly billing-related
+  // names so we don't accidentally exclude real physical parts.
+  //
+
+  if (value === "call out fee") {
+    return true;
+  }
+
+  if (value === "call-out fee") {
+    return true;
+  }
+
+  if (value === "call out charge") {
+    return true;
+  }
+
+  if (value === "call-out charge") {
+    return true;
+  }
+
+  return false;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Keep this alias for readability in the processing section.
+function isLaborItem(name) {
+  return isNonInventoryItem(name);
 }
-
-// ------------------------------------------------------------
-// POST
-// ------------------------------------------------------------
 
 export async function POST(request) {
   const t0 = Date.now();
@@ -88,34 +156,22 @@ export async function POST(request) {
   const elapsed = () =>
     `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-  // ----------------------------------------------------------
-  // READ REQUEST
-  // ----------------------------------------------------------
-
-  const body = await request
+  const { access_token } = await request
     .json()
     .catch(() => ({}));
 
-  const access_token = body?.access_token;
-
   if (!access_token) {
     return NextResponse.json(
-      {
-        error: "Missing session.",
-      },
+      { error: "Missing session." },
       { status: 401 }
     );
   }
-
-  // ----------------------------------------------------------
-  // SUPABASE ADMIN
-  // ----------------------------------------------------------
 
   let admin;
 
   try {
     admin = supabaseAdmin();
-  } catch (e) {
+  } catch {
     return NextResponse.json(
       {
         error:
@@ -125,79 +181,56 @@ export async function POST(request) {
     );
   }
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // AUTHENTICATE USER
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
-  const {
-    data: userData,
-    error: userErr,
-  } = await admin.auth.getUser(access_token);
+  const { data: userData, error: userErr } =
+    await admin.auth.getUser(access_token);
 
   if (userErr || !userData?.user) {
     return NextResponse.json(
-      {
-        error: "Invalid session.",
-      },
+      { error: "Invalid session." },
       { status: 401 }
     );
   }
 
-  const userId = userData.user.id;
+  // ------------------------------------------------------------
+  // GET ORGANIZATION
+  // ------------------------------------------------------------
 
-  // ----------------------------------------------------------
-  // GET PROFILE / ORG
-  // ----------------------------------------------------------
-
-  const {
-    data: profile,
-    error: profileErr,
-  } = await admin
+  const { data: profile } = await admin
     .from("profiles")
     .select("org_id")
-    .eq("id", userId)
+    .eq("id", userData.user.id)
     .single();
 
-  if (profileErr || !profile?.org_id) {
+  if (!profile?.org_id) {
     return NextResponse.json(
-      {
-        error: "No organization found.",
-      },
+      { error: "No organization found." },
       { status: 400 }
     );
   }
 
   const orgId = profile.org_id;
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // GET SERVICEM8 INTEGRATION
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
-  const {
-    data: integration,
-    error: integrationErr,
-  } = await admin
+  const { data: integration } = await admin
     .from("integrations")
     .select("id, connected")
     .eq("org_id", orgId)
     .eq("provider", "servicem8")
     .single();
 
-  if (
-    integrationErr ||
-    !integration?.connected
-  ) {
+  if (!integration?.connected) {
     return NextResponse.json(
-      {
-        error: "ServiceM8 isn't connected.",
-      },
+      { error: "ServiceM8 isn't connected." },
       { status: 400 }
     );
   }
-
-  // ----------------------------------------------------------
-  // ACCESS TOKEN
-  // ----------------------------------------------------------
 
   let sm8Token;
 
@@ -208,28 +241,23 @@ export async function POST(request) {
     );
   } catch (e) {
     return NextResponse.json(
-      {
-        error: e.message,
-      },
+      { error: e.message },
       { status: 400 }
     );
   }
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // MAIN WAREHOUSE
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
-  const {
-    data: mainLoc,
-    error: locationErr,
-  } = await admin
+  const { data: mainLoc } = await admin
     .from("locations")
     .select("id")
     .eq("org_id", orgId)
     .eq("code", "MAIN")
     .single();
 
-  if (locationErr || !mainLoc?.id) {
+  if (!mainLoc?.id) {
     return NextResponse.json(
       {
         error:
@@ -239,9 +267,9 @@ export async function POST(request) {
     );
   }
 
-  // ----------------------------------------------------------
-  // FETCH SERVICEM8 JOBS + COMPANIES
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // FETCH RECENT SERVICEM8 JOBS
+  // ------------------------------------------------------------
 
   const cutoff = new Date();
 
@@ -257,21 +285,13 @@ export async function POST(request) {
   let sm8Companies;
 
   try {
-    [sm8Jobs, sm8Companies] =
-      await Promise.all([
-        fetchJobs(sm8Token, cutoffStr),
-        fetchCompanies(sm8Token),
-      ]);
+    [sm8Jobs, sm8Companies] = await Promise.all([
+      fetchJobs(sm8Token, cutoffStr),
+      fetchCompanies(sm8Token),
+    ]);
   } catch (e) {
-    console.error(
-      "[sm8 sync] failed fetching jobs/companies:",
-      e
-    );
-
     return NextResponse.json(
-      {
-        error: e.message,
-      },
+      { error: e.message },
       { status: 502 }
     );
   }
@@ -284,60 +304,55 @@ export async function POST(request) {
     } companies — ${elapsed()}`
   );
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // COMPANY LOOKUP
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
   const companyName = {};
 
-  for (const company of sm8Companies || []) {
-    if (company?.uuid) {
-      companyName[company.uuid] =
-        company.name || "Unknown client";
-    }
+  for (const c of sm8Companies || []) {
+    companyName[c.uuid] = c.name;
   }
 
-  // ----------------------------------------------------------
-  // FILTER JOBS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // FILTER RELEVANT JOBS
+  // ------------------------------------------------------------
 
-  const relevantJobs = (sm8Jobs || []).filter(
-    (job) => {
-      if (!job?.uuid) return false;
-
-      if (!job.status) return false;
-
-      if (
-        job.status === "Quote" ||
-        job.status === "Cancelled"
-      ) {
-        return false;
-      }
-
-      const jobNo = String(
-        job.generated_job_id || ""
-      )
-        .trim()
-        .toUpperCase();
-
-      const client = String(
-        companyName[job.company_uuid] || ""
-      )
-        .trim()
-        .toLowerCase();
-
-      if (jobNo === "SAMPLE") {
-        return false;
-      }
-
-      if (client.includes("help guide")) {
-        return false;
-      }
-
-      return true;
+  const relevantJobs = (sm8Jobs || []).filter((j) => {
+    if (
+      !j.uuid ||
+      !j.status ||
+      j.status === "Quote" ||
+      j.status === "Cancelled"
+    ) {
+      return false;
     }
-  );
 
+    const jobNo = (
+      j.generated_job_id || ""
+    )
+      .trim()
+      .toUpperCase();
+
+    const client = (
+      companyName[j.company_uuid] || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    // Ignore ServiceM8's built-in sample job.
+    if (
+      jobNo === "SAMPLE" ||
+      client.includes("help guide")
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  // Sort UUIDs so the checkpoint remains stable even if
+  // ServiceM8 changes the order of returned jobs.
   relevantJobs.sort((a, b) =>
     String(a.uuid).localeCompare(
       String(b.uuid)
@@ -345,94 +360,57 @@ export async function POST(request) {
   );
 
   console.log(
-    `[sm8 sync] ${
-      relevantJobs.length
-    } relevant jobs after filtering — ${elapsed()}`
+    `[sm8 sync] ${relevantJobs.length} relevant jobs after filtering — ${elapsed()}`
   );
 
-  // ----------------------------------------------------------
-  // EXISTING JOBS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // LOAD EXISTING JOBS
+  // ------------------------------------------------------------
 
-  const {
-    data: existingJobs,
-    error: existingJobsErr,
-  } = await admin
+  const { data: existingJobs } = await admin
     .from("jobs")
-    .select(
-      "id, servicem8_job_uuid"
-    )
+    .select("id, servicem8_job_uuid")
     .eq("org_id", orgId)
-    .not(
-      "servicem8_job_uuid",
-      "is",
-      null
-    );
+    .not("servicem8_job_uuid", "is", null);
 
-  if (existingJobsErr) {
-    return NextResponse.json(
-      {
-        error:
-          existingJobsErr.message,
-      },
-      { status: 500 }
-    );
-  }
-
-  const jobIdByUuid = {};
-
-  for (const job of existingJobs || []) {
-    if (job.servicem8_job_uuid) {
-      jobIdByUuid[
-        job.servicem8_job_uuid
-      ] = job.id;
-    }
-  }
+  const jobIdByUuid = Object.fromEntries(
+    (existingJobs || []).map((j) => [
+      j.servicem8_job_uuid,
+      j.id,
+    ])
+  );
 
   const preExistingUuids = new Set(
     Object.keys(jobIdByUuid)
   );
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // UPSERT JOBS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
   let jobsCreated = 0;
   let jobsUpdated = 0;
 
   if (relevantJobs.length > 0) {
-    const jobRows =
-      relevantJobs.map((job) => ({
-        org_id: orgId,
-
-        job_no:
-          job.generated_job_id ||
-          job.uuid,
-
-        client:
-          companyName[
-            job.company_uuid
-          ] ||
-          "Unknown client",
-
-        address:
-          job.job_address || null,
-
-        job_date:
-          String(job.date || "")
-            .slice(0, 10) ||
-          new Date()
-            .toISOString()
-            .slice(0, 10),
-
-        location_id: mainLoc.id,
-
-        servicem8_job_uuid:
-          job.uuid,
-      }));
+    const jobRows = relevantJobs.map((j) => ({
+      org_id: orgId,
+      job_no:
+        j.generated_job_id || j.uuid,
+      client:
+        companyName[j.company_uuid] ||
+        "Unknown client",
+      address: j.job_address || null,
+      job_date:
+        (j.date || "").slice(0, 10) ||
+        new Date()
+          .toISOString()
+          .slice(0, 10),
+      location_id: mainLoc.id,
+      servicem8_job_uuid: j.uuid,
+    }));
 
     const {
-      data: upsertedJobs,
+      data: upserted,
       error: upsertErr,
     } = await admin.rpc(
       "upsert_synced_jobs",
@@ -442,21 +420,15 @@ export async function POST(request) {
     );
 
     if (upsertErr) {
-      console.error(
-        "[sm8 sync] job upsert failed:",
-        upsertErr
-      );
-
       return NextResponse.json(
         {
-          error:
-            `Job upsert failed: ${upsertErr.message}`,
+          error: `Job upsert failed: ${upsertErr.message}`,
         },
         { status: 500 }
       );
     }
 
-    for (const row of upsertedJobs || []) {
+    for (const row of upserted || []) {
       jobIdByUuid[
         row.servicem8_job_uuid
       ] = row.id;
@@ -477,17 +449,13 @@ export async function POST(request) {
     `[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`
   );
 
-  // ----------------------------------------------------------
-  // JOB UUIDS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // CHECKPOINT
+  // ------------------------------------------------------------
 
   const allJobUuids = relevantJobs
-    .map((job) => job.uuid)
+    .map((j) => j.uuid)
     .filter(Boolean);
-
-  // ----------------------------------------------------------
-  // CHECKPOINT
-  // ----------------------------------------------------------
 
   const {
     data: syncState,
@@ -503,19 +471,17 @@ export async function POST(request) {
   if (syncStateErr) {
     return NextResponse.json(
       {
-        error:
-          `Could not load ServiceM8 sync checkpoint: ${syncStateErr.message}`,
+        error: `Could not load ServiceM8 sync checkpoint: ${syncStateErr.message}`,
       },
       { status: 500 }
     );
   }
 
-  const savedJobUuids =
-    Array.isArray(
-      syncState?.job_uuids
-    )
-      ? syncState.job_uuids
-      : [];
+  const savedJobUuids = Array.isArray(
+    syncState?.job_uuids
+  )
+    ? syncState.job_uuids
+    : [];
 
   const sameJobSet =
     savedJobUuids.length ===
@@ -527,6 +493,12 @@ export async function POST(request) {
 
   let nextIndex = 0;
 
+  // If the previous sync is incomplete and the job set
+  // hasn't changed, continue from the saved position.
+  //
+  // If the previous sync is complete, this click starts
+  // a fresh pass. Duplicate protection below means already
+  // processed material UUIDs will still be skipped.
   if (
     syncState &&
     sameJobSet &&
@@ -535,15 +507,13 @@ export async function POST(request) {
   ) {
     nextIndex = Math.max(
       0,
-      Number(
-        syncState.next_index || 0
-      )
+      Number(syncState.next_index || 0)
     );
   }
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // NO JOBS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
   if (allJobUuids.length === 0) {
     await admin
@@ -569,35 +539,30 @@ export async function POST(request) {
     return NextResponse.json({
       ok: true,
       syncComplete: true,
-
       jobsCreated,
       jobsUpdated,
-
       materialsDeducted: 0,
       materialsFlagged: 0,
-
-      materialsSkippedNonInventory: 0,
-
       totalJobs: 0,
       nextIndex: 0,
-
       message:
         "No relevant ServiceM8 jobs found in the sync window.",
-
       diagnostics: {
+        totalMaterialsSeen: 0,
+        materialsSkippedNoJob: 0,
+        materialsSkippedNoQty: 0,
+        materialsSkippedNonInventory: 0,
+        materialsSkippedLabor: 0,
         elapsed: elapsed(),
       },
     });
   }
 
-  // ----------------------------------------------------------
-  // INITIALIZE / RESET CHECKPOINT
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // SAVE / UPDATE CHECKPOINT BEFORE MATERIAL FETCH
+  // ------------------------------------------------------------
 
-  if (
-    !syncState ||
-    !sameJobSet
-  ) {
+  if (!syncState || !sameJobSet) {
     nextIndex = 0;
 
     const {
@@ -617,8 +582,7 @@ export async function POST(request) {
     if (checkpointErr) {
       return NextResponse.json(
         {
-          error:
-            `Could not initialize ServiceM8 sync checkpoint: ${checkpointErr.message}`,
+          error: `Could not initialize ServiceM8 sync checkpoint: ${checkpointErr.message}`,
         },
         { status: 500 }
       );
@@ -629,29 +593,27 @@ export async function POST(request) {
     );
   }
 
-  // ----------------------------------------------------------
-  // CURRENT JOB BATCH
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // DETERMINE THIS BATCH
+  // ------------------------------------------------------------
 
   const batchStart = nextIndex;
 
-  const batchJobUuids =
-    allJobUuids.slice(
-      batchStart,
-      batchStart + JOB_BATCH_SIZE
-    );
+  const batchJobUuids = allJobUuids.slice(
+    batchStart,
+    batchStart + JOB_BATCH_SIZE
+  );
 
   const batchEnd =
-    batchStart +
-    batchJobUuids.length;
+    batchStart + batchJobUuids.length;
 
   console.log(
     `[sm8 sync] processing jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length} — ${elapsed()}`
   );
 
-  // ----------------------------------------------------------
-  // FETCH MATERIALS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // FETCH MATERIALS ONLY FOR THIS BATCH
+  // ------------------------------------------------------------
 
   let sm8Materials = [];
 
@@ -662,6 +624,11 @@ export async function POST(request) {
         batchJobUuids
       );
   } catch (e) {
+    // IMPORTANT:
+    // We intentionally do NOT advance the checkpoint here.
+    // If ServiceM8 returns 429 or the request fails, the next
+    // Sync click will retry this exact same batch.
+
     console.error(
       `[sm8 sync] material fetch failed for jobs ${batchStart + 1}-${batchEnd}:`,
       e
@@ -670,19 +637,14 @@ export async function POST(request) {
     return NextResponse.json(
       {
         error: e.message,
-
         syncComplete: false,
-
         retryable: true,
-
         checkpoint: {
           nextIndex: batchStart,
-          totalJobs:
-            allJobUuids.length,
+          totalJobs: allJobUuids.length,
           jobsAttempted:
             batchJobUuids.length,
         },
-
         message:
           "Material sync stopped at the current checkpoint. The next Sync will retry this batch.",
       },
@@ -694,199 +656,129 @@ export async function POST(request) {
     `[sm8 sync] fetched ${sm8Materials.length} material lines across ${batchJobUuids.length} jobs — ${elapsed()}`
   );
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // LOAD PARTS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
-  const {
-    data: parts,
-    error: partsErr,
-  } = await admin
+  const { data: parts } = await admin
     .from("parts")
     .select(
       "id, sku, part_no, unit_cost"
     )
     .eq("org_id", orgId);
 
-  if (partsErr) {
-    return NextResponse.json(
-      {
-        error:
-          `Could not load parts: ${partsErr.message}`,
-      },
-      { status: 500 }
-    );
-  }
-
   const partByKey = {};
 
-  for (const part of parts || []) {
-    if (part.sku) {
+  for (const p of parts || []) {
+    if (p.sku) {
       partByKey[
-        String(part.sku)
-          .trim()
-          .toLowerCase()
-      ] = part;
+        p.sku.trim().toLowerCase()
+      ] = p;
     }
 
-    if (part.part_no) {
+    if (p.part_no) {
       partByKey[
-        String(part.part_no)
-          .trim()
-          .toLowerCase()
-      ] = part;
+        p.part_no.trim().toLowerCase()
+      ] = p;
     }
   }
 
-  // ----------------------------------------------------------
-  // EXISTING MATERIAL UUIDS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // LOAD ALREADY PROCESSED MATERIALS
+  // ------------------------------------------------------------
 
-  const {
-    data: alreadySyncedLines,
-  } = await admin
-    .from("job_line_items")
-    .select(
-      "servicem8_material_uuid"
-    )
-    .not(
-      "servicem8_material_uuid",
-      "is",
-      null
-    );
+  const { data: alreadySyncedLines } =
+    await admin
+      .from("job_line_items")
+      .select("servicem8_material_uuid")
+      .not(
+        "servicem8_material_uuid",
+        "is",
+        null
+      );
 
   const syncedUuids = new Set(
     (alreadySyncedLines || []).map(
-      (line) =>
-        line.servicem8_material_uuid
+      (l) =>
+        l.servicem8_material_uuid
     )
   );
 
-  // ----------------------------------------------------------
-  // EXISTING FLAGGED UUIDS
-  // ----------------------------------------------------------
-
-  const {
-    data: alreadyFlagged,
-  } = await admin
-    .from("unmatched_materials")
-    .select(
-      "servicem8_material_uuid"
-    );
+  const { data: alreadyFlagged } =
+    await admin
+      .from("unmatched_materials")
+      .select("servicem8_material_uuid");
 
   const flaggedUuids = new Set(
     (alreadyFlagged || []).map(
-      (item) =>
-        item.servicem8_material_uuid
+      (f) =>
+        f.servicem8_material_uuid
     )
   );
 
-  // ----------------------------------------------------------
-  // DEBUG / COUNTERS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // BUILD MATERIAL PAYLOAD
+  // ------------------------------------------------------------
+
+  let materialsDeducted = 0;
+  let materialsFlagged = 0;
+  let materialsSkippedNoJob = 0;
+  let materialsSkippedNoQty = 0;
+  let materialsSkippedNonInventory = 0;
+
+  // Keep this for compatibility with the existing activity log.
+  let materialsSkippedLabor = 0;
 
   const totalMaterialsSeen =
     sm8Materials.length;
 
-  let materialsSkippedNonInventory = 0;
-  let materialsSkippedNoJob = 0;
-  let materialsSkippedNoQty = 0;
+  // ------------------------------------------------------------
+  // IDENTIFY NON-INVENTORY ITEMS
+  // ------------------------------------------------------------
 
-  // ----------------------------------------------------------
-  // IDENTIFY NON-INVENTORY ITEMS FIRST
-  // ----------------------------------------------------------
-  //
-  // THIS IS THE IMPORTANT PART.
-  //
-  // We remove labor / technician / hours /
-  // truck charges BEFORE inventory matching.
-  //
-  // Therefore these items:
-  //
-  // SERVICE CALL FEE / TRUCK CHARGE
-  // Technician Labour After Hours (2Hr minimum)
-  // LABOUR MITCHELL
-  // Technician Labour
-  // Labour Technician + Apprentice
-  // TRUCK CHARGE
-  //
-  // NEVER reach the inventory matching system.
-  // ----------------------------------------------------------
+  const nonInventoryMaterials =
+    sm8Materials.filter((m) =>
+      isNonInventoryItem(m.name)
+    );
 
-  for (const material of sm8Materials) {
-    if (
-      isNonInventoryItem(
-        material?.name
-      )
-    ) {
-      materialsSkippedNonInventory++;
+  for (const item of nonInventoryMaterials) {
+    materialsSkippedNonInventory++;
+    materialsSkippedLabor++;
 
-      console.log(
-        `[sm8 sync] NON-INVENTORY SKIPPED: "${material.name}"`
-      );
-    }
+    console.log(
+      `[sm8 sync] skipping non-inventory billing item: ${item.name}`
+    );
   }
 
-  // ----------------------------------------------------------
-  // CANDIDATE INVENTORY MATERIALS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // CANDIDATE MATERIALS
+  // ------------------------------------------------------------
+  //
+  // Non-inventory billing items are excluded BEFORE:
+  //
+  // - job matching
+  // - quantity validation
+  // - part matching
+  // - inventory deduction
+  // - Needs Review
+  // - process_synced_materials RPC
+  //
+  // ------------------------------------------------------------
 
   const candidateMaterials =
     sm8Materials.filter(
-      (material) => {
-        if (!material?.uuid) {
-          return false;
-        }
-
-        if (
-          syncedUuids.has(
-            material.uuid
-          )
-        ) {
-          return false;
-        }
-
-        if (
-          flaggedUuids.has(
-            material.uuid
-          )
-        ) {
-          return false;
-        }
-
-        // ----------------------------------------------------
-        // CRITICAL:
-        // LABOR / TECHNICIAN / HOURS / TRUCK /
-        // SERVICE CALL CHARGES ARE NOT INVENTORY.
-        // ----------------------------------------------------
-
-        if (
-          isNonInventoryItem(
-            material.name
-          )
-        ) {
-          return false;
-        }
-
-        return true;
-      }
+      (m) =>
+        m.uuid &&
+        !syncedUuids.has(m.uuid) &&
+        !flaggedUuids.has(m.uuid) &&
+        !isNonInventoryItem(m.name)
     );
-
-  console.log(
-    `[sm8 sync] ${candidateMaterials.length} inventory candidates remain after excluding ${materialsSkippedNonInventory} non-inventory charges`
-  );
-
-  // ----------------------------------------------------------
-  // BUILD MATERIAL PAYLOAD
-  // ----------------------------------------------------------
 
   const materialPayload = [];
 
-  for (const material of candidateMaterials) {
+  for (const m of candidateMaterials) {
     const jobId =
-      jobIdByUuid[
-        material.job_uuid
-      ];
+      jobIdByUuid[m.job_uuid];
 
     if (!jobId) {
       materialsSkippedNoJob++;
@@ -894,9 +786,7 @@ export async function POST(request) {
     }
 
     const qty = Number(
-      material.quantity ??
-        material.qty ??
-        0
+      m.quantity ?? m.qty ?? 0
     );
 
     if (!qty) {
@@ -904,85 +794,70 @@ export async function POST(request) {
       continue;
     }
 
-    const materialName =
-      String(
-        material.name || ""
-      ).trim();
+    const key = (m.name || "")
+      .trim()
+      .toLowerCase();
 
-    const key =
-      materialName.toLowerCase();
-
-    const matchingPart =
-      partByKey[key];
+    const match = partByKey[key];
 
     materialPayload.push({
       job_id: jobId,
 
-      part_id:
-        matchingPart?.id || null,
+      part_id: match
+        ? match.id
+        : null,
 
       servicem8_material_uuid:
-        material.uuid,
+        m.uuid,
 
       raw_name:
-        materialName ||
-        "(unnamed)",
+        m.name || "(unnamed)",
 
       qty,
 
       unit_cost:
-        Number(material.cost) ||
-        Number(
-          matchingPart?.unit_cost
-        ) ||
+        Number(m.cost) ||
+        (match
+          ? match.unit_cost
+          : 0) ||
         0,
 
       sale_cost:
-        Number(material.price) || 0,
+        Number(m.price) || 0,
     });
   }
 
-  // ----------------------------------------------------------
-  // PROCESS INVENTORY MATERIALS
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // PROCESS MATERIALS
+  // ------------------------------------------------------------
 
-  let materialsDeducted = 0;
-  let materialsFlagged = 0;
-
-  if (
-    materialPayload.length > 0
-  ) {
+  if (materialPayload.length > 0) {
     const {
       data: result,
       error: processErr,
-    } = await admin.rpc(
-      "process_synced_materials",
-      {
+    } = await admin
+      .rpc("process_synced_materials", {
         p_org_id: orgId,
-
-        p_location_id:
-          mainLoc.id,
-
-        p_materials:
-          materialPayload,
-      }
-    );
+        p_location_id: mainLoc.id,
+        p_materials: materialPayload,
+      })
+      .single();
 
     if (processErr) {
+      // IMPORTANT:
+      // Do not advance checkpoint if material processing fails.
+      // The same batch will be retried next time.
+
       console.error(
-        "[sm8 sync] material processing failed:",
+        `[sm8 sync] material processing failed for jobs ${batchStart + 1}-${batchEnd}:`,
         processErr
       );
 
       return NextResponse.json(
         {
-          error:
-            `Material processing failed: ${processErr.message}`,
-
+          error: `Material processing failed: ${processErr.message}`,
           syncComplete: false,
-
           retryable: true,
-
           checkpoint: {
             nextIndex: batchStart,
             totalJobs:
@@ -990,7 +865,6 @@ export async function POST(request) {
             jobsAttempted:
               batchJobUuids.length,
           },
-
           message:
             "The checkpoint was not advanced because material processing failed.",
         },
@@ -998,46 +872,27 @@ export async function POST(request) {
       );
     }
 
-    // --------------------------------------------------------
-    // SUPPORT DIFFERENT RPC RETURN SHAPES
-    // --------------------------------------------------------
-
-    const rpcResult =
-      Array.isArray(result)
-        ? result[0]
-        : result;
-
     materialsDeducted =
-      Number(
-        rpcResult?.deducted_count ??
-          rpcResult?.materials_deducted ??
-          0
-      );
+      result?.deducted_count || 0;
 
     materialsFlagged =
-      Number(
-        rpcResult?.flagged_count ??
-          rpcResult?.materials_flagged ??
-          0
-      );
+      result?.flagged_count || 0;
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} inventory material lines — ${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory charges skipped — ${elapsed()}`
+    `[sm8 sync] processed ${materialPayload.length} inventory material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory skipped) — ${elapsed()}`
   );
 
-  // ----------------------------------------------------------
-  // CHECKPOINT ADVANCE
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // ADVANCE CHECKPOINT
+  // ------------------------------------------------------------
 
   const syncComplete =
-    batchEnd >=
-    allJobUuids.length;
+    batchEnd >= allJobUuids.length;
 
-  const newNextIndex =
-    syncComplete
-      ? allJobUuids.length
-      : batchEnd;
+  const newNextIndex = syncComplete
+    ? allJobUuids.length
+    : batchEnd;
 
   const {
     error: checkpointUpdateErr,
@@ -1045,43 +900,38 @@ export async function POST(request) {
     .from("servicem8_sync_state")
     .upsert({
       org_id: orgId,
-
-      job_uuids:
-        allJobUuids,
-
-      next_index:
-        newNextIndex,
-
+      job_uuids: allJobUuids,
+      next_index: newNextIndex,
       sync_started_at:
         syncState?.sync_started_at ||
         new Date().toISOString(),
-
       updated_at:
         new Date().toISOString(),
     });
 
   if (checkpointUpdateErr) {
+    // IMPORTANT:
+    // Material processing has already succeeded.
+    // The material UUID protection prevents duplicate processing
+    // if this checkpoint save fails and the batch is retried.
+
     console.error(
-      "[sm8 sync] checkpoint update failed:",
+      `[sm8 sync] WARNING: checkpoint update failed:`,
       checkpointUpdateErr
     );
 
     return NextResponse.json(
       {
         ok: true,
-
         syncComplete: false,
-
         warning:
-          "Materials were processed, but the sync checkpoint could not be saved.",
+          "Materials were processed, but the sync checkpoint could not be saved. Existing material UUID protection will prevent duplicate processing.",
 
         jobsCreated,
         jobsUpdated,
 
         materialsDeducted,
         materialsFlagged,
-
-        materialsSkippedNonInventory,
 
         checkpoint: {
           nextIndex: batchStart,
@@ -1090,14 +940,24 @@ export async function POST(request) {
           jobsProcessedThisRun:
             batchJobUuids.length,
         },
+
+        diagnostics: {
+          totalMaterialsSeen,
+          materialsSkippedNoJob,
+          materialsSkippedNoQty,
+          materialsSkippedNonInventory,
+          materialsSkippedLabor,
+          batchSize: JOB_BATCH_SIZE,
+          elapsed: elapsed(),
+        },
       },
       { status: 200 }
     );
   }
 
-  // ----------------------------------------------------------
-  // UPDATE LAST SYNC
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
+  // UPDATE LAST SYNC TIME
+  // ------------------------------------------------------------
 
   await admin
     .from("integrations")
@@ -1107,32 +967,22 @@ export async function POST(request) {
     })
     .eq("id", integration.id);
 
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // ACTIVITY LOG
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
-  try {
-    await admin
-      .from("activity_log")
-      .insert({
-        org_id: orgId,
+  await admin.from("activity_log").insert({
+    org_id: orgId,
+    user_id: userData.user.id,
 
-        user_id: userId,
+    message: syncComplete
+      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory billing item(s) skipped.`
+      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory billing item(s) skipped.`,
+  });
 
-        message: syncComplete
-          ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`
-          : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`,
-      });
-  } catch (e) {
-    console.warn(
-      "[sm8 sync] activity log failed:",
-      e
-    );
-  }
-
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
   // RESPONSE
-  // ----------------------------------------------------------
+  // ------------------------------------------------------------
 
   return NextResponse.json({
     ok: true,
@@ -1144,11 +994,6 @@ export async function POST(request) {
 
     materialsDeducted,
     materialsFlagged,
-
-    // IMPORTANT:
-    // This is the number of LABOR / TECHNICIAN /
-    // HOURS / TRUCK / SERVICE CHARGES excluded.
-    materialsSkippedNonInventory,
 
     checkpoint: {
       processedFrom:
@@ -1177,23 +1022,24 @@ export async function POST(request) {
     diagnostics: {
       totalMaterialsSeen,
 
-      inventoryCandidates:
-        candidateMaterials.length,
-
-      materialPayload:
-        materialPayload.length,
-
       materialsSkippedNoJob,
 
       materialsSkippedNoQty,
 
       materialsSkippedNonInventory,
 
+      materialsSkippedLabor,
+
       batchSize:
         JOB_BATCH_SIZE,
 
       elapsed:
         elapsed(),
+
+      // Temporary diagnostic data.
+      // Remove this later once material matching is confirmed.
+      sampleRawMaterials:
+        sm8Materials.slice(0, 3),
     },
   });
 }
