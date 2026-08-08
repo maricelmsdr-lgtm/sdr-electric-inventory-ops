@@ -157,6 +157,33 @@ export async function POST(request) {
   }
   console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs — ${elapsed()}`);
 
+  // ---------------------------------------------------------------------
+  // TEMPORARY DEBUG — bundle investigation (job #15158 / $JOBMATERIAL)
+  // Logs the raw, unprocessed material lines for job 15158 exactly as
+  // ServiceM8's API returned them, before any matching/filtering touches
+  // them. Goal: see whether a bundle line's inner parts (e.g.
+  // TYWRAP8MOUNTBLK, HSK4) come back as separate sibling rows in this same
+  // array (maybe tagged with a parent/bundle uuid field), or whether only
+  // the bundle header ($JOBMATERIAL) is present and the components require
+  // a separate API call. Remove this block once that's confirmed.
+  // ---------------------------------------------------------------------
+  const DEBUG_JOB_NO = "15158";
+  const debugJobUuid = relevantJobs.find(
+    (j) => (j.generated_job_id || "").trim() === DEBUG_JOB_NO
+  )?.uuid;
+  if (debugJobUuid) {
+    const debugLines = sm8Materials.filter((m) => m.job_uuid === debugJobUuid);
+    console.log(
+      `[DEBUG bundle] job #${DEBUG_JOB_NO} (${debugJobUuid}) — ${debugLines.length} raw material line(s):`
+    );
+    console.log(JSON.stringify(debugLines, null, 2));
+  } else {
+    console.log(`[DEBUG bundle] job #${DEBUG_JOB_NO} not found in this sync's relevantJobs (check SYNC_WINDOW_DAYS / job status).`);
+  }
+  // ---------------------------------------------------------------------
+  // END TEMPORARY DEBUG
+  // ---------------------------------------------------------------------
+
   // Match materials to the parts catalog. Prefer matching on ServiceM8's own
   // catalog item CODE (via material_uuid → material.json) — that's the real
   // part number, e.g. "TYWRAP8MOUNTBLK" — over the job material's "name"
