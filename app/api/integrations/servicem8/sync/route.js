@@ -14,140 +14,163 @@ const JOB_BATCH_SIZE = 10;
 const SYNC_WINDOW_DAYS = 14;
 
 // ------------------------------------------------------------
-// NON-INVENTORY DETECTION
+// NON-INVENTORY SERVICE / LABOR DETECTION
 // ------------------------------------------------------------
 //
-// ServiceM8 "Job Materials" contains more than physical parts.
+// ServiceM8 calls many things "materials", but not every line is an
+// inventory part. Labor, technician time, service fees, truck charges,
+// and similar service-only charges must NEVER be sent to inventory
+// matching, deduction, or Needs Review.
 //
-// Some entries are:
+// This intentionally uses keyword/pattern matching instead of exact
+// names because ServiceM8 names vary, for example:
+// - Technician Labour
+// - Technician Labor
+// - Labour Technician Travis + Apprentice Justin 2026-08-06
+// - Technician Labour After Hours (2Hr minimum)
+// - Labour Technician and Apprentice After Hours
+// - SERVICE CALL FEE / TRUCK CHARGE
+// - SERVICE RATE
+// - TRUCK CHARGE
+// - SERVICE CALL FEE
+// - After-installation callback or warranty service related to a
+//   previously completed installation. No labor charge to customer.
 //
-// - Labor / Labour
-// - Technician hours
-// - After-hours labor
-// - Truck charges
-// - Service call fees
-// - Service rates
-// - Other service charges
-//
-// These are BILLING ITEMS, NOT INVENTORY.
-//
-// They must NEVER:
-// - be matched against SDR parts
-// - be deducted from stock
-// - be sent to Needs Review
-// - be sent to process_synced_materials
-//
+// IMPORTANT: These lines can still appear in RAW SERVICE8 DATA because
+// that section shows what ServiceM8 actually returned. The filter below
+// is what prevents them from becoming inventory candidates.
 // ------------------------------------------------------------
 
-function isNonInventoryItem(name) {
+function isNonInventoryCharge(name) {
   const value = String(name || "")
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\s+/g, " ");
 
-  if (!value) {
-    return false;
-  }
+  if (!value) return false;
 
   // ----------------------------------------------------------
-  // LABOR / LABOUR
+  // LABOUR / LABOR
   // ----------------------------------------------------------
 
+  // Matches:
+  // labour
+  // labor
+  // technician labour
+  // labour technician
+  // labour + apprentice
+  // labor cost
+  // Labour Technician Travis + Apprentice Justin
   if (/\blabou?r\b/i.test(value)) {
     return true;
   }
 
   // ----------------------------------------------------------
-  // HOURS / HOUR
+  // HOURS / TECHNICIAN TIME
   // ----------------------------------------------------------
 
+  // Matches:
+  // hour
+  // hours
+  // hr
+  // hrs
+  // 2hr
+  // 2 hrs
+  // 2.5 hours
+  // after hours
   if (/\bhours?\b/i.test(value)) {
     return true;
   }
 
-  // ----------------------------------------------------------
-  // HR / HRS
-  //
-  // Handles:
-  // 2Hr
-  // 2 Hrs
-  // 2 HR
-  // 2 HRS
-  // ----------------------------------------------------------
+  if (/\b(?:\d+(?:\.\d+)?\s*)?hrs?\b/i.test(value)) {
+    return true;
+  }
 
-  if (/(?:^|[^a-z])(?:\d+\s*)?hrs?\b/i.test(value)) {
+  if (/\bafter\s+hours?\b/i.test(value)) {
     return true;
   }
 
   // ----------------------------------------------------------
-  // TRUCK CHARGES
+  // TECHNICIAN / APPRENTICE TIME
   // ----------------------------------------------------------
 
-  if (value.includes("truck charge")) {
+  if (
+    /\btechnician\b.*\b(?:apprentice|hours?|hrs?|hr)\b/i.test(
+      value
+    )
+  ) {
     return true;
   }
 
-  if (value.includes("truck charges")) {
-    return true;
-  }
-
-  // ----------------------------------------------------------
-  // SERVICE CALL / SERVICE CHARGES
-  // ----------------------------------------------------------
-
-  if (value.includes("service call fee")) {
-    return true;
-  }
-
-  if (value.includes("service call charge")) {
-    return true;
-  }
-
-  if (value.includes("service charge")) {
-    return true;
-  }
-
-  if (value.includes("service charges")) {
+  if (
+    /\bapprentice\b.*\b(?:technician|hours?|hrs?|hr)\b/i.test(
+      value
+    )
+  ) {
     return true;
   }
 
   // ----------------------------------------------------------
-  // SERVICE RATE
+  // SERVICE / TRUCK / CALL CHARGES
   // ----------------------------------------------------------
 
-  if (value.includes("service rate")) {
+  if (/\bservice\s+call\s+fee\b/i.test(value)) {
+    return true;
+  }
+
+  if (/\bservice\s+fee\b/i.test(value)) {
+    return true;
+  }
+
+  if (/\bservice\s+rate\b/i.test(value)) {
+    return true;
+  }
+
+  if (/\bservice\s+charge\b/i.test(value)) {
+    return true;
+  }
+
+  if (/\btruck\s+charge\b/i.test(value)) {
+    return true;
+  }
+
+  if (
+    /\bcall\s*-?\s*out\s+(?:fee|charge|rate)\b/i.test(
+      value
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\btravel\s+(?:fee|charge)\b/i.test(value)
+  ) {
     return true;
   }
 
   // ----------------------------------------------------------
-  // OTHER COMMON NON-INVENTORY BILLING ITEMS
+  // WARRANTY / CALLBACK SERVICE
   // ----------------------------------------------------------
-  //
-  // These are intentionally limited to clearly billing-related
-  // names so we don't accidentally exclude real physical parts.
-  //
 
-  if (value === "call out fee") {
+  if (
+    /\b(?:after[- ]installation|post[- ]installation)\b.*\bcallback\b/i.test(
+      value
+    )
+  ) {
     return true;
   }
 
-  if (value === "call-out fee") {
-    return true;
-  }
-
-  if (value === "call out charge") {
-    return true;
-  }
-
-  if (value === "call-out charge") {
+  if (
+    /\bwarranty\b/i.test(value) &&
+    /\b(?:service|callback|labor|labour|charge|fee)\b/i.test(
+      value
+    )
+  ) {
     return true;
   }
 
   return false;
-}
-
-// Keep this alias for readability in the processing section.
-function isLaborItem(name) {
-  return isNonInventoryItem(name);
 }
 
 export async function POST(request) {
@@ -511,10 +534,7 @@ export async function POST(request) {
     );
   }
 
-  // ------------------------------------------------------------
-  // NO JOBS
-  // ------------------------------------------------------------
-
+  // If there are no jobs, clear/reset the checkpoint.
   if (allJobUuids.length === 0) {
     await admin
       .from("servicem8_sync_state")
@@ -548,11 +568,6 @@ export async function POST(request) {
       message:
         "No relevant ServiceM8 jobs found in the sync window.",
       diagnostics: {
-        totalMaterialsSeen: 0,
-        materialsSkippedNoJob: 0,
-        materialsSkippedNoQty: 0,
-        materialsSkippedNonInventory: 0,
-        materialsSkippedLabor: 0,
         elapsed: elapsed(),
       },
     });
@@ -628,7 +643,6 @@ export async function POST(request) {
     // We intentionally do NOT advance the checkpoint here.
     // If ServiceM8 returns 429 or the request fails, the next
     // Sync click will retry this exact same batch.
-
     console.error(
       `[sm8 sync] material fetch failed for jobs ${batchStart + 1}-${batchEnd}:`,
       e
@@ -726,27 +740,23 @@ export async function POST(request) {
   let materialsSkippedNoQty = 0;
   let materialsSkippedNonInventory = 0;
 
-  // Keep this for compatibility with the existing activity log.
-  let materialsSkippedLabor = 0;
-
   const totalMaterialsSeen =
     sm8Materials.length;
 
   // ------------------------------------------------------------
-  // IDENTIFY NON-INVENTORY ITEMS
+  // IDENTIFY NON-INVENTORY CHARGES
   // ------------------------------------------------------------
 
-  const nonInventoryMaterials =
+  const nonInventoryItems =
     sm8Materials.filter((m) =>
-      isNonInventoryItem(m.name)
+      isNonInventoryCharge(m.name)
     );
 
-  for (const item of nonInventoryMaterials) {
+  for (const item of nonInventoryItems) {
     materialsSkippedNonInventory++;
-    materialsSkippedLabor++;
 
     console.log(
-      `[sm8 sync] skipping non-inventory billing item: ${item.name}`
+      `[sm8 sync] skipping non-inventory charge: ${item.name}`
     );
   }
 
@@ -754,16 +764,13 @@ export async function POST(request) {
   // CANDIDATE MATERIALS
   // ------------------------------------------------------------
   //
-  // Non-inventory billing items are excluded BEFORE:
+  // Non-inventory labor/service lines are excluded HERE.
   //
-  // - job matching
-  // - quantity validation
+  // They therefore NEVER reach:
   // - part matching
   // - inventory deduction
   // - Needs Review
-  // - process_synced_materials RPC
   //
-  // ------------------------------------------------------------
 
   const candidateMaterials =
     sm8Materials.filter(
@@ -771,7 +778,7 @@ export async function POST(request) {
         m.uuid &&
         !syncedUuids.has(m.uuid) &&
         !flaggedUuids.has(m.uuid) &&
-        !isNonInventoryItem(m.name)
+        !isNonInventoryCharge(m.name)
     );
 
   const materialPayload = [];
@@ -802,26 +809,20 @@ export async function POST(request) {
 
     materialPayload.push({
       job_id: jobId,
-
       part_id: match
         ? match.id
         : null,
-
       servicem8_material_uuid:
         m.uuid,
-
       raw_name:
         m.name || "(unnamed)",
-
       qty,
-
       unit_cost:
         Number(m.cost) ||
         (match
           ? match.unit_cost
           : 0) ||
         0,
-
       sale_cost:
         Number(m.price) || 0,
     });
@@ -847,7 +848,6 @@ export async function POST(request) {
       // IMPORTANT:
       // Do not advance checkpoint if material processing fails.
       // The same batch will be retried next time.
-
       console.error(
         `[sm8 sync] material processing failed for jobs ${batchStart + 1}-${batchEnd}:`,
         processErr
@@ -880,7 +880,7 @@ export async function POST(request) {
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} inventory material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory skipped) — ${elapsed()}`
+    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory charges skipped) — ${elapsed()}`
   );
 
   // ------------------------------------------------------------
@@ -914,7 +914,6 @@ export async function POST(request) {
     // Material processing has already succeeded.
     // The material UUID protection prevents duplicate processing
     // if this checkpoint save fails and the batch is retried.
-
     console.error(
       `[sm8 sync] WARNING: checkpoint update failed:`,
       checkpointUpdateErr
@@ -926,29 +925,16 @@ export async function POST(request) {
         syncComplete: false,
         warning:
           "Materials were processed, but the sync checkpoint could not be saved. Existing material UUID protection will prevent duplicate processing.",
-
         jobsCreated,
         jobsUpdated,
-
         materialsDeducted,
         materialsFlagged,
-
         checkpoint: {
           nextIndex: batchStart,
           totalJobs:
             allJobUuids.length,
           jobsProcessedThisRun:
             batchJobUuids.length,
-        },
-
-        diagnostics: {
-          totalMaterialsSeen,
-          materialsSkippedNoJob,
-          materialsSkippedNoQty,
-          materialsSkippedNonInventory,
-          materialsSkippedLabor,
-          batchSize: JOB_BATCH_SIZE,
-          elapsed: elapsed(),
         },
       },
       { status: 200 }
@@ -974,10 +960,9 @@ export async function POST(request) {
   await admin.from("activity_log").insert({
     org_id: orgId,
     user_id: userData.user.id,
-
     message: syncComplete
-      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory billing item(s) skipped.`
-      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory billing item(s) skipped.`,
+      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`
+      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`,
   });
 
   // ------------------------------------------------------------
@@ -998,16 +983,10 @@ export async function POST(request) {
     checkpoint: {
       processedFrom:
         batchStart + 1,
-
-      processedTo:
-        batchEnd,
-
-      nextIndex:
-        newNextIndex,
-
+      processedTo: batchEnd,
+      nextIndex: newNextIndex,
       totalJobs:
         allJobUuids.length,
-
       remainingJobs: Math.max(
         0,
         allJobUuids.length -
@@ -1021,20 +1000,11 @@ export async function POST(request) {
 
     diagnostics: {
       totalMaterialsSeen,
-
       materialsSkippedNoJob,
-
       materialsSkippedNoQty,
-
       materialsSkippedNonInventory,
-
-      materialsSkippedLabor,
-
-      batchSize:
-        JOB_BATCH_SIZE,
-
-      elapsed:
-        elapsed(),
+      batchSize: JOB_BATCH_SIZE,
+      elapsed: elapsed(),
 
       // Temporary diagnostic data.
       // Remove this later once material matching is confirmed.
