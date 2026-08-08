@@ -49,21 +49,9 @@ function isNonInventoryCharge(name) {
 
   if (!value) return false;
 
-  /*
-  |--------------------------------------------------------------------------
-  | LABOR / LABOUR
-  |--------------------------------------------------------------------------
-  */
-
   if (/\blabou?r\b/i.test(value)) {
     return true;
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | HOURS / HR / HRS
-  |--------------------------------------------------------------------------
-  */
 
   if (/\bhours?\b/i.test(value)) {
     return true;
@@ -76,12 +64,6 @@ function isNonInventoryCharge(name) {
   if (/\bafter\s+hours?\b/i.test(value)) {
     return true;
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | TECHNICIAN / APPRENTICE TIME
-  |--------------------------------------------------------------------------
-  */
 
   if (
     /\btechnician\b.*\b(?:apprentice|hours?|hrs?|hr)\b/i.test(
@@ -98,12 +80,6 @@ function isNonInventoryCharge(name) {
   ) {
     return true;
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | SERVICE / TRUCK / CALL CHARGES
-  |--------------------------------------------------------------------------
-  */
 
   if (/\bservice\s+call\s+fee\b/i.test(value)) {
     return true;
@@ -139,12 +115,6 @@ function isNonInventoryCharge(name) {
     return true;
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | WARRANTY / CALLBACK SERVICE
-  |--------------------------------------------------------------------------
-  */
-
   if (
     /\b(?:after[- ]installation|post[- ]installation)\b.*\bcallback\b/i.test(
       value
@@ -177,12 +147,6 @@ export async function POST(request) {
   const elapsed = () =>
     `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-  /*
-  |--------------------------------------------------------------------------
-  | READ REQUEST
-  |--------------------------------------------------------------------------
-  */
-
   const body = await request
     .json()
     .catch(() => ({}));
@@ -197,12 +161,6 @@ export async function POST(request) {
       { status: 400 }
     );
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | SUPABASE ADMIN
-  |--------------------------------------------------------------------------
-  */
 
   let admin;
 
@@ -219,12 +177,6 @@ export async function POST(request) {
   }
 
   const orgId = requestedOrgId;
-
-  /*
-  |--------------------------------------------------------------------------
-  | VERIFY ORGANIZATION EXISTS
-  |--------------------------------------------------------------------------
-  */
 
   const {
     data: orgCheck,
@@ -255,12 +207,6 @@ export async function POST(request) {
     );
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | GET SERVICEM8 INTEGRATION
-  |--------------------------------------------------------------------------
-  */
-
   const {
     data: integration,
     error: integrationError,
@@ -289,12 +235,6 @@ export async function POST(request) {
     );
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | SERVICE M8 TOKEN
-  |--------------------------------------------------------------------------
-  */
-
   let sm8Token;
 
   try {
@@ -312,12 +252,6 @@ export async function POST(request) {
       { status: 400 }
     );
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | MAIN WAREHOUSE
-  |--------------------------------------------------------------------------
-  */
 
   const {
     data: mainLoc,
@@ -347,12 +281,6 @@ export async function POST(request) {
       { status: 400 }
     );
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | FETCH RECENT SERVICEM8 JOBS
-  |--------------------------------------------------------------------------
-  */
 
   const cutoff = new Date();
 
@@ -392,12 +320,6 @@ export async function POST(request) {
     } companies — ${elapsed()}`
   );
 
-  /*
-  |--------------------------------------------------------------------------
-  | COMPANY LOOKUP
-  |--------------------------------------------------------------------------
-  */
-
   const companyName = {};
 
   for (const company of sm8Companies || []) {
@@ -406,12 +328,6 @@ export async function POST(request) {
         company.name || "";
     }
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | FILTER RELEVANT JOBS
-  |--------------------------------------------------------------------------
-  */
 
   const relevantJobs = (
     sm8Jobs || []
@@ -437,12 +353,6 @@ export async function POST(request) {
       .trim()
       .toLowerCase();
 
-    /*
-    |--------------------------------------------------------------------------
-    | IGNORE SERVICEM8 SAMPLE / HELP GUIDE JOB
-    |--------------------------------------------------------------------------
-    */
-
     if (
       jobNo === "SAMPLE" ||
       client.includes("help guide")
@@ -455,9 +365,20 @@ export async function POST(request) {
 
   /*
   |--------------------------------------------------------------------------
-  | STABLE JOB ORDER
+  | DEBUG — is job 15158 even in this window?
+  |--------------------------------------------------------------------------
+  | Logged once per run, cheap, tells us immediately whether the 14-day
+  | SYNC_WINDOW_DAYS is excluding it before we even get to batching.
   |--------------------------------------------------------------------------
   */
+  const debugTargetJob = (sm8Jobs || []).find(
+    (j) => String(j.generated_job_id || "").trim() === "15158"
+  );
+  console.log(
+    debugTargetJob
+      ? `[DEBUG bundle] job #15158 found in sm8Jobs (uuid ${debugTargetJob.uuid}, status ${debugTargetJob.status}, date ${debugTargetJob.date})`
+      : `[DEBUG bundle] job #15158 NOT found in sm8Jobs at all — check SYNC_WINDOW_DAYS (${SYNC_WINDOW_DAYS} days) or that it's the right org.`
+  );
 
   relevantJobs.sort((a, b) =>
     String(a.uuid).localeCompare(
@@ -468,12 +389,6 @@ export async function POST(request) {
   console.log(
     `[sm8 sync] ${relevantJobs.length} relevant jobs after filtering — ${elapsed()}`
   );
-
-  /*
-  |--------------------------------------------------------------------------
-  | LOAD EXISTING JOBS
-  |--------------------------------------------------------------------------
-  */
 
   const {
     data: existingJobs,
@@ -511,12 +426,6 @@ export async function POST(request) {
     new Set(
       Object.keys(jobIdByUuid)
     );
-
-  /*
-  |--------------------------------------------------------------------------
-  | UPSERT JOBS
-  |--------------------------------------------------------------------------
-  */
 
   let jobsCreated = 0;
   let jobsUpdated = 0;
@@ -596,12 +505,6 @@ export async function POST(request) {
     } jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`
   );
 
-  /*
-  |--------------------------------------------------------------------------
-  | CHECKPOINT
-  |--------------------------------------------------------------------------
-  */
-
   const allJobUuids =
     relevantJobs
       .map((job) => job.uuid)
@@ -646,12 +549,6 @@ export async function POST(request) {
 
   let nextIndex = 0;
 
-  /*
-  |--------------------------------------------------------------------------
-  | CONTINUE INCOMPLETE CHECKPOINT
-  |--------------------------------------------------------------------------
-  */
-
   if (
     syncState &&
     sameJobSet &&
@@ -666,12 +563,6 @@ export async function POST(request) {
       )
     );
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | NO JOBS
-  |--------------------------------------------------------------------------
-  */
 
   if (
     allJobUuids.length === 0
@@ -720,12 +611,6 @@ export async function POST(request) {
     });
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | SAVE / UPDATE CHECKPOINT
-  |--------------------------------------------------------------------------
-  */
-
   if (
     !syncState ||
     !sameJobSet
@@ -766,12 +651,6 @@ export async function POST(request) {
     );
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | DETERMINE CURRENT BATCH
-  |--------------------------------------------------------------------------
-  */
-
   const batchStart =
     nextIndex;
 
@@ -796,9 +675,14 @@ export async function POST(request) {
 
   /*
   |--------------------------------------------------------------------------
-  | FETCH MATERIALS FOR CURRENT BATCH
+  | DEBUG — is job 15158 in THIS batch?
   |--------------------------------------------------------------------------
   */
+  if (debugTargetJob && batchJobUuids.includes(debugTargetJob.uuid)) {
+    console.log(`[DEBUG bundle] job #15158 IS in this batch — its materials will be in the fetch below.`);
+  } else if (debugTargetJob) {
+    console.log(`[DEBUG bundle] job #15158 exists but is NOT in this batch (jobs ${batchStart + 1}-${batchEnd}). Keep clicking Sync to advance the checkpoint until it's included.`);
+  }
 
   let sm8Materials = [];
 
@@ -853,9 +737,41 @@ export async function POST(request) {
 
   /*
   |--------------------------------------------------------------------------
-  | LOAD INVENTORY PARTS
+  | DEBUG — bundle detection (general, across whatever batch just ran)
+  |--------------------------------------------------------------------------
+  | Finds any line that is either:
+  |   (a) a bundle CHILD — has a non-empty job_material_bundle_uuid, or
+  |   (b) a bundle HEADER — its own uuid is referenced by another line's
+  |       job_material_bundle_uuid
+  | Logs the full raw JSON for any such lines found, plus job 15158's
+  | lines specifically if that job landed in this batch.
   |--------------------------------------------------------------------------
   */
+  const headerUuidsReferenced = new Set(
+    sm8Materials
+      .map((m) => m.job_material_bundle_uuid)
+      .filter((v) => v && v !== "")
+  );
+  const bundleRelatedLines = sm8Materials.filter(
+    (m) =>
+      (m.job_material_bundle_uuid && m.job_material_bundle_uuid !== "") ||
+      headerUuidsReferenced.has(m.uuid)
+  );
+  if (bundleRelatedLines.length > 0) {
+    console.log(
+      `[DEBUG bundle] found ${bundleRelatedLines.length} bundle-related line(s) in this batch:`
+    );
+    console.log(JSON.stringify(bundleRelatedLines, null, 2));
+  } else {
+    console.log(`[DEBUG bundle] no bundle-related lines (job_material_bundle_uuid) found in this batch's ${sm8Materials.length} material line(s).`);
+  }
+  if (debugTargetJob) {
+    const job15158Lines = sm8Materials.filter((m) => m.job_uuid === debugTargetJob.uuid);
+    if (job15158Lines.length > 0) {
+      console.log(`[DEBUG bundle] job #15158 raw material lines (${job15158Lines.length}):`);
+      console.log(JSON.stringify(job15158Lines, null, 2));
+    }
+  }
 
   const {
     data: parts,
@@ -897,12 +813,6 @@ export async function POST(request) {
     }
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | LOAD ALREADY PROCESSED MATERIALS
-  |--------------------------------------------------------------------------
-  */
-
   const {
     data: alreadySyncedLines,
     error: alreadySyncedError,
@@ -937,12 +847,6 @@ export async function POST(request) {
         .filter(Boolean)
     );
 
-  /*
-  |--------------------------------------------------------------------------
-  | LOAD ALREADY FLAGGED MATERIALS
-  |--------------------------------------------------------------------------
-  */
-
   const {
     data: alreadyFlagged,
     error: alreadyFlaggedError,
@@ -972,12 +876,6 @@ export async function POST(request) {
         .filter(Boolean)
     );
 
-  /*
-  |--------------------------------------------------------------------------
-  | COUNTERS
-  |--------------------------------------------------------------------------
-  */
-
   let materialsDeducted = 0;
   let materialsFlagged = 0;
 
@@ -987,22 +885,6 @@ export async function POST(request) {
 
   const totalMaterialsSeen =
     sm8Materials.length;
-
-  /*
-  |--------------------------------------------------------------------------
-  | HARD FILTER — NON-INVENTORY
-  |--------------------------------------------------------------------------
-  |
-  | This happens BEFORE:
-  |
-  |   part matching
-  |   inventory deduction
-  |   unmatched_materials
-  |   Needs Review
-  |
-  | This is the critical protection.
-  |--------------------------------------------------------------------------
-  */
 
   const nonInventoryItems =
     sm8Materials.filter((material) =>
@@ -1023,27 +905,12 @@ export async function POST(request) {
     );
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | CANDIDATE MATERIALS
-  |--------------------------------------------------------------------------
-  |
-  | ONLY physical inventory is allowed beyond this point.
-  |--------------------------------------------------------------------------
-  */
-
   const candidateMaterials =
     sm8Materials.filter(
       (material) => {
         if (!material?.uuid) {
           return false;
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | ABSOLUTE RULE
-        |--------------------------------------------------------------------------
-        */
 
         if (
           isNonInventoryCharge(
@@ -1052,12 +919,6 @@ export async function POST(request) {
         ) {
           return false;
         }
-
-        /*
-        |--------------------------------------------------------------------------
-        | DUPLICATE PROTECTION
-        |--------------------------------------------------------------------------
-        */
 
         if (
           syncedUuids.has(
@@ -1078,12 +939,6 @@ export async function POST(request) {
         return true;
       }
     );
-
-  /*
-  |--------------------------------------------------------------------------
-  | BUILD INVENTORY PAYLOAD
-  |--------------------------------------------------------------------------
-  */
 
   const materialPayload = [];
 
@@ -1110,14 +965,6 @@ export async function POST(request) {
       materialsSkippedNoQty++;
       continue;
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | IMPORTANT
-    |
-    | Only non-labor/non-service candidates reach this point.
-    |--------------------------------------------------------------------------
-    */
 
     const key = String(
       material.name || ""
@@ -1158,12 +1005,6 @@ export async function POST(request) {
         0,
     });
   }
-
-  /*
-  |--------------------------------------------------------------------------
-  | PROCESS PHYSICAL INVENTORY ONLY
-  |--------------------------------------------------------------------------
-  */
 
   if (
     materialPayload.length > 0
@@ -1234,12 +1075,6 @@ export async function POST(request) {
       );
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | LOG RESULT
-  |--------------------------------------------------------------------------
-  */
-
   console.log(
     `[sm8 sync] processed ${
       materialPayload.length
@@ -1251,12 +1086,6 @@ export async function POST(request) {
       materialsSkippedNonInventory
     } service/labor lines skipped — ${elapsed()}`
   );
-
-  /*
-  |--------------------------------------------------------------------------
-  | ADVANCE CHECKPOINT
-  |--------------------------------------------------------------------------
-  */
 
   const syncComplete =
     batchEnd >=
@@ -1327,12 +1156,6 @@ export async function POST(request) {
     );
   }
 
-  /*
-  |--------------------------------------------------------------------------
-  | UPDATE LAST SYNC TIME
-  |--------------------------------------------------------------------------
-  */
-
   await admin
     .from("integrations")
     .update({
@@ -1344,12 +1167,6 @@ export async function POST(request) {
       integration.id
     );
 
-  /*
-  |--------------------------------------------------------------------------
-  | ACTIVITY LOG
-  |--------------------------------------------------------------------------
-  */
-
   await admin
     .from("activity_log")
     .insert({
@@ -1359,12 +1176,6 @@ export async function POST(request) {
         ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} physical material(s) deducted, ${materialsFlagged} physical material(s) flagged for review, ${materialsSkippedNonInventory} labor/service charge(s) excluded from inventory.`
         : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} physical material(s) deducted, ${materialsFlagged} physical material(s) flagged for review, ${materialsSkippedNonInventory} labor/service charge(s) excluded from inventory.`,
     });
-
-  /*
-  |--------------------------------------------------------------------------
-  | FINAL RESPONSE
-  |--------------------------------------------------------------------------
-  */
 
   return NextResponse.json({
     ok: true,
@@ -1419,12 +1230,6 @@ export async function POST(request) {
 
       elapsed:
         elapsed(),
-
-      /*
-      |--------------------------------------------------------------------------
-      | TEMPORARY DEBUG
-      |--------------------------------------------------------------------------
-      */
 
       sampleRawMaterials:
         sm8Materials.slice(
