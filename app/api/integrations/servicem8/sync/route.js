@@ -13,6 +13,7 @@ export const maxDuration = 60;
 // stock on hand, is written to unmatched_materials for manual review
 // instead of silently failing or going negative.
 export async function POST(request) {
+  console.log("MARKER_TEST_7f40507_CHECK");
   const t0 = Date.now();
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
