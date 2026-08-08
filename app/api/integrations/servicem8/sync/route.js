@@ -113,40 +113,34 @@ export async function POST(request) {
     .eq("org_id", profile.org_id)
     .not("servicem8_job_uuid", "is", null);
   const jobIdByUuid = Object.fromEntries((existingJobs || []).map((j) => [j.servicem8_job_uuid, j.id]));
+  const preExistingUuids = new Set(Object.keys(jobIdByUuid));
 
-  // Job upserts hit Supabase, not ServiceM8, so there's no external rate
-  // limit to respect here — running them in small concurrent batches
-  // (rather than one at a time) cuts a meaningful chunk of wall-clock time
-  // off large syncs, same idea as the materials fetch below.
-  const JOB_UPSERT_BATCH_SIZE = 10;
+  // Upsert every job in ONE call instead of one HTTP round trip per job —
+  // with a few hundred jobs in a 90-day window, that per-row approach was
+  // most of what blew past Vercel's 60s limit (confirmed via the Vercel
+  // function logs: a long list of individual POST requests to Supabase).
+  // See supabase/007_bulk_sync_functions.sql.
   let jobsCreated = 0;
   let jobsUpdated = 0;
-  for (let i = 0; i < relevantJobs.length; i += JOB_UPSERT_BATCH_SIZE) {
-    const batch = relevantJobs.slice(i, i + JOB_UPSERT_BATCH_SIZE);
-    await Promise.all(
-      batch.map(async (j) => {
-        const row = {
-          org_id: profile.org_id,
-          job_no: j.generated_job_id || j.uuid,
-          client: companyName[j.company_uuid] || "Unknown client",
-          address: j.job_address || null,
-          job_date: (j.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10),
-          location_id: mainLoc.id,
-          servicem8_job_uuid: j.uuid,
-          synced_from_servicem8: true,
-        };
-        if (jobIdByUuid[j.uuid]) {
-          await admin.from("jobs").update(row).eq("id", jobIdByUuid[j.uuid]);
-          jobsUpdated++;
-        } else {
-          const { data: inserted, error: insErr } = await admin.from("jobs").insert(row).select("id").single();
-          if (!insErr && inserted) {
-            jobIdByUuid[j.uuid] = inserted.id;
-            jobsCreated++;
-          }
-        }
-      })
-    );
+  if (relevantJobs.length > 0) {
+    const jobRows = relevantJobs.map((j) => ({
+      org_id: profile.org_id,
+      job_no: j.generated_job_id || j.uuid,
+      client: companyName[j.company_uuid] || "Unknown client",
+      address: j.job_address || null,
+      job_date: (j.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10),
+      location_id: mainLoc.id,
+      servicem8_job_uuid: j.uuid,
+    }));
+    const { data: upserted, error: upsertErr } = await admin.rpc("upsert_synced_jobs", { p_jobs: jobRows });
+    if (upsertErr) {
+      return NextResponse.json({ error: `Job upsert failed: ${upsertErr.message}` }, { status: 500 });
+    }
+    for (const row of upserted || []) {
+      jobIdByUuid[row.servicem8_job_uuid] = row.id;
+      if (preExistingUuids.has(row.servicem8_job_uuid)) jobsUpdated++;
+      else jobsCreated++;
+    }
   }
   console.log(`[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`);
 
@@ -184,95 +178,61 @@ export async function POST(request) {
   const { data: alreadyFlagged } = await admin.from("unmatched_materials").select("servicem8_material_uuid");
   const flaggedUuids = new Set((alreadyFlagged || []).map((f) => f.servicem8_material_uuid));
 
-  // Each material line does 1-2 database round trips (a stock-deduction RPC,
-  // then either an insert or a flag). Doing that one line at a time was the
-  // remaining bottleneck once the ServiceM8 fetches were batched — with a
-  // few hundred material lines across 90 days of jobs, sequential round
-  // trips alone can exceed the route's time limit. These are all writes to
-  // our own database (no external rate limit), so batching them concurrently
-  // is safe — apply_inventory_qty_change does its increment/negative-check
-  // as a single atomic update, so concurrent calls (even against the same
-  // part) still serialize correctly at the database level.
-  const MATERIAL_PROCESS_BATCH_SIZE = 8;
+  // Match materials to the parts catalog by SKU or part number in memory
+  // (cheap — no network cost), then hand the whole resolved batch to
+  // Postgres in ONE call instead of one HTTP round trip per material line.
+  // With a few hundred material lines, that per-row approach (even
+  // "concurrent" in small batches) was the dominant cost — confirmed via
+  // Vercel's function logs showing a long list of individual POST requests
+  // to Supabase. See supabase/007_bulk_sync_functions.sql.
   let materialsDeducted = 0;
   let materialsFlagged = 0;
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
   const totalMaterialsSeen = (sm8Materials || []).length;
 
-  const materialsToProcess = (sm8Materials || []).filter(
+  const candidateMaterials = (sm8Materials || []).filter(
     (m) => m.uuid && !syncedUuids.has(m.uuid) && !flaggedUuids.has(m.uuid)
   );
 
-  const processMaterial = async (m) => {
+  const materialPayload = [];
+  for (const m of candidateMaterials) {
     const jobId = jobIdByUuid[m.job_uuid];
-    if (!jobId) return "skipped_no_job"; // material belongs to a job we didn't pull (quote/cancelled)
+    if (!jobId) { materialsSkippedNoJob++; continue; } // material belongs to a job we didn't pull (quote/cancelled)
 
     const qty = Number(m.quantity ?? m.qty ?? 0);
-    if (!qty) return "skipped_no_qty";
+    if (!qty) { materialsSkippedNoQty++; continue; }
 
     const key = (m.name || "").trim().toLowerCase();
     const match = partByKey[key];
 
-    if (!match) {
-      await admin.from("unmatched_materials").insert({
-        org_id: profile.org_id,
-        job_id: jobId,
-        servicem8_material_uuid: m.uuid,
-        raw_name: m.name || "(unnamed)",
-        qty,
-        unit_cost: Number(m.cost) || 0,
-        reason: "no_match",
-      });
-      return "flagged";
-    }
-
-    // Try the deduction first — the DB rejects it if it would take
-    // that location negative. If it fails, flag for review instead
-    // of recording a line item for stock that was never actually moved.
-    const { error: rpcErr } = await admin.rpc("apply_inventory_qty_change", {
-      p_org_id: profile.org_id,
-      p_part_id: match.id,
-      p_location_id: mainLoc.id,
-      p_delta: -qty,
-    });
-
-    if (rpcErr) {
-      await admin.from("unmatched_materials").insert({
-        org_id: profile.org_id,
-        job_id: jobId,
-        servicem8_material_uuid: m.uuid,
-        raw_name: m.name || "(unnamed)",
-        qty,
-        unit_cost: Number(m.cost) || 0,
-        reason: "insufficient_stock",
-      });
-      return "flagged";
-    }
-
-    await admin.from("job_line_items").insert({
+    materialPayload.push({
       job_id: jobId,
-      part_id: match.id,
-      qty,
-      part_cost: Number(m.cost) || match.unit_cost || 0,
-      sale_cost: Number(m.price) || 0,
+      part_id: match ? match.id : null,
       servicem8_material_uuid: m.uuid,
+      raw_name: m.name || "(unnamed)",
+      qty,
+      unit_cost: Number(m.cost) || (match ? match.unit_cost : 0) || 0,
+      sale_cost: Number(m.price) || 0,
     });
-    return "deducted";
-  };
-
-  for (let i = 0; i < materialsToProcess.length; i += MATERIAL_PROCESS_BATCH_SIZE) {
-    const batch = materialsToProcess.slice(i, i + MATERIAL_PROCESS_BATCH_SIZE);
-    const outcomes = await Promise.all(batch.map(processMaterial));
-    for (const outcome of outcomes) {
-      if (outcome === "deducted") materialsDeducted++;
-      else if (outcome === "flagged") materialsFlagged++;
-      else if (outcome === "skipped_no_job") materialsSkippedNoJob++;
-      else if (outcome === "skipped_no_qty") materialsSkippedNoQty++;
-    }
   }
 
-  console.log(`[sm8 sync] processed ${materialsToProcess.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) — ${elapsed()}`);
+  if (materialPayload.length > 0) {
+    const { data: result, error: processErr } = await admin
+      .rpc("process_synced_materials", {
+        p_org_id: profile.org_id,
+        p_location_id: mainLoc.id,
+        p_materials: materialPayload,
+      })
+      .single();
+    if (processErr) {
+      return NextResponse.json({ error: `Material processing failed: ${processErr.message}` }, { status: 500 });
+    }
+    materialsDeducted = result?.deducted_count || 0;
+    materialsFlagged = result?.flagged_count || 0;
+  }
+
+  console.log(`[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) — ${elapsed()}`);
 
   await admin.from("integrations").update({ last_synced_at: new Date().toISOString() }).eq("id", integration.id);
   await admin.from("activity_log").insert({
