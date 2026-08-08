@@ -7,49 +7,71 @@ import {
   fetchCompanies,
 } from "@/lib/servicem8";
 
-// Retrying through a rate limit can take a while.
 export const maxDuration = 60;
 
 const JOB_BATCH_SIZE = 10;
 const SYNC_WINDOW_DAYS = 14;
 
 // ------------------------------------------------------------
-// LABOR DETECTION
+// NON-INVENTORY ITEM DETECTION
 // ------------------------------------------------------------
 //
-// Labor is NOT inventory.
+// These are charges/services, NOT physical inventory.
 //
 // Examples:
+// - SERVICE CALL FEE / TRUCK CHARGE
 // - Technician Labour
-// - Technician Labor
+// - TRUCK CHARGE
+// - LABOUR MITCHELL
+// - Labour Technician + Apprentice
 // - Technician Labour After Hours (2Hr minimum)
-// - 2 HR
-// - 2 HRS
-// - 3 Hours
-// - After Hours
+// - Technician
+// - Apprentice
+// - 2 Hours
+// - 2 Hrs
 //
-// These items must never be sent to inventory deduction.
+// These items must NOT be:
+// - matched to inventory
+// - deducted from stock
+// - sent to Needs Review
 //
 
-function isLaborItem(name) {
-  const value = String(name || "").trim().toLowerCase();
+function isNonInventoryItem(name) {
+  const value = String(name || "")
+    .trim()
+    .toLowerCase();
 
-  // labor / labour
-  if (/\blabou?r\b/i.test(value)) {
-    return true;
-  }
+  const nonInventoryPatterns = [
+    // Labor / labour
+    /\blabou?r\b/,
 
-  // hour / hours
-  if (/\bhours?\b/i.test(value)) {
-    return true;
-  }
+    // Technician / apprentice charges
+    /\btechnician\b/,
+    /\bapprentice\b/,
 
-  // hr / hrs, including "2Hr", "2 Hrs", etc.
-  if (/(?:^|[^a-z])(?:\d+\s*)?hrs?\b/i.test(value)) {
-    return true;
-  }
+    // Time-based labor
+    /\bhours?\b/,
+    /\bhrs?\b/,
 
-  return false;
+    // Truck charges
+    /\btruck\s+(charge|fee)\b/,
+
+    // Service call charges
+    /\bservice\s+call\s+(fee|charge)\b/,
+
+    // Call-out charges
+    /\bcall\s*out\s+(fee|charge)\b/,
+
+    // General service charges
+    /\bservice\s+(fee|charge)\b/,
+
+    // Trip charges
+    /\btrip\s+(fee|charge)\b/,
+  ];
+
+  return nonInventoryPatterns.some((pattern) =>
+    pattern.test(value)
+  );
 }
 
 export async function POST(request) {
@@ -242,7 +264,6 @@ export async function POST(request) {
       .trim()
       .toLowerCase();
 
-    // Ignore ServiceM8's built-in sample job.
     if (
       jobNo === "SAMPLE" ||
       client.includes("help guide")
@@ -253,8 +274,6 @@ export async function POST(request) {
     return true;
   });
 
-  // Sort UUIDs so the checkpoint remains stable even if
-  // ServiceM8 changes the order of returned jobs.
   relevantJobs.sort((a, b) =>
     String(a.uuid).localeCompare(
       String(b.uuid)
@@ -395,12 +414,6 @@ export async function POST(request) {
 
   let nextIndex = 0;
 
-  // If the previous sync is incomplete and the job set
-  // hasn't changed, continue from the saved position.
-  //
-  // If the previous sync is complete, this click starts
-  // a fresh pass. Duplicate protection below means already
-  // processed material UUIDs will still be skipped.
   if (
     syncState &&
     sameJobSet &&
@@ -413,7 +426,10 @@ export async function POST(request) {
     );
   }
 
-  // If there are no jobs, clear/reset the checkpoint.
+  // ------------------------------------------------------------
+  // NO JOBS
+  // ------------------------------------------------------------
+
   if (allJobUuids.length === 0) {
     await admin
       .from("servicem8_sync_state")
@@ -442,6 +458,7 @@ export async function POST(request) {
       jobsUpdated,
       materialsDeducted: 0,
       materialsFlagged: 0,
+      materialsSkippedNonInventory: 0,
       totalJobs: 0,
       nextIndex: 0,
       message:
@@ -453,7 +470,7 @@ export async function POST(request) {
   }
 
   // ------------------------------------------------------------
-  // SAVE / UPDATE CHECKPOINT BEFORE MATERIAL FETCH
+  // INITIALIZE CHECKPOINT
   // ------------------------------------------------------------
 
   if (!syncState || !sameJobSet) {
@@ -488,7 +505,7 @@ export async function POST(request) {
   }
 
   // ------------------------------------------------------------
-  // DETERMINE THIS BATCH
+  // DETERMINE CURRENT BATCH
   // ------------------------------------------------------------
 
   const batchStart = nextIndex;
@@ -506,7 +523,7 @@ export async function POST(request) {
   );
 
   // ------------------------------------------------------------
-  // FETCH MATERIALS ONLY FOR THIS BATCH
+  // FETCH MATERIALS
   // ------------------------------------------------------------
 
   let sm8Materials = [];
@@ -518,10 +535,6 @@ export async function POST(request) {
         batchJobUuids
       );
   } catch (e) {
-    // IMPORTANT:
-    // We intentionally do NOT advance the checkpoint here.
-    // If ServiceM8 returns 429 or the request fails, the next
-    // Sync click will retry this exact same batch.
     console.error(
       `[sm8 sync] material fetch failed for jobs ${batchStart + 1}-${batchEnd}:`,
       e
@@ -610,6 +623,24 @@ export async function POST(request) {
   );
 
   // ------------------------------------------------------------
+  // IDENTIFY NON-INVENTORY CHARGES
+  // ------------------------------------------------------------
+
+  const nonInventoryItems =
+    sm8Materials.filter((m) =>
+      isNonInventoryItem(m.name)
+    );
+
+  let materialsSkippedNonInventory =
+    nonInventoryItems.length;
+
+  for (const item of nonInventoryItems) {
+    console.log(
+      `[sm8 sync] skipping non-inventory charge: ${item.name}`
+    );
+  }
+
+  // ------------------------------------------------------------
   // BUILD MATERIAL PAYLOAD
   // ------------------------------------------------------------
 
@@ -617,36 +648,15 @@ export async function POST(request) {
   let materialsFlagged = 0;
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
-  let materialsSkippedLabor = 0;
 
   const totalMaterialsSeen =
     sm8Materials.length;
 
   // ------------------------------------------------------------
-  // IDENTIFY LABOR
-  // ------------------------------------------------------------
-
-  const laborMaterials =
-    sm8Materials.filter((m) =>
-      isLaborItem(m.name)
-    );
-
-  for (const labor of laborMaterials) {
-    materialsSkippedLabor++;
-
-    console.log(
-      `[sm8 sync] skipping labor item: ${labor.name}`
-    );
-  }
-
-  // ------------------------------------------------------------
   // CANDIDATE MATERIALS
   // ------------------------------------------------------------
   //
-  // Labor is excluded here so it never reaches:
-  // - part matching
-  // - inventory deduction
-  // - Needs Review
+  // Non-inventory charges are removed BEFORE matching.
   //
 
   const candidateMaterials =
@@ -655,7 +665,7 @@ export async function POST(request) {
         m.uuid &&
         !syncedUuids.has(m.uuid) &&
         !flaggedUuids.has(m.uuid) &&
-        !isLaborItem(m.name)
+        !isNonInventoryItem(m.name)
     );
 
   const materialPayload = [];
@@ -706,7 +716,7 @@ export async function POST(request) {
   }
 
   // ------------------------------------------------------------
-  // PROCESS MATERIALS
+  // PROCESS ACTUAL INVENTORY MATERIALS
   // ------------------------------------------------------------
 
   if (materialPayload.length > 0) {
@@ -722,9 +732,6 @@ export async function POST(request) {
       .single();
 
     if (processErr) {
-      // IMPORTANT:
-      // Do not advance checkpoint if material processing fails.
-      // The same batch will be retried next time.
       console.error(
         `[sm8 sync] material processing failed for jobs ${batchStart + 1}-${batchEnd}:`,
         processErr
@@ -757,7 +764,7 @@ export async function POST(request) {
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedLabor} labor skipped) — ${elapsed()}`
+    `[sm8 sync] processed ${materialPayload.length} inventory material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory charges skipped) — ${elapsed()}`
   );
 
   // ------------------------------------------------------------
@@ -787,10 +794,6 @@ export async function POST(request) {
     });
 
   if (checkpointUpdateErr) {
-    // IMPORTANT:
-    // Material processing has already succeeded.
-    // The material UUID protection prevents duplicate processing
-    // if this checkpoint save fails and the batch is retried.
     console.error(
       `[sm8 sync] WARNING: checkpoint update failed:`,
       checkpointUpdateErr
@@ -806,6 +809,7 @@ export async function POST(request) {
         jobsUpdated,
         materialsDeducted,
         materialsFlagged,
+        materialsSkippedNonInventory,
         checkpoint: {
           nextIndex: batchStart,
           totalJobs:
@@ -838,8 +842,8 @@ export async function POST(request) {
     org_id: orgId,
     user_id: userData.user.id,
     message: syncComplete
-      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedLabor} labor item(s) skipped.`
-      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedLabor} labor item(s) skipped.`,
+      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`
+      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`,
   });
 
   // ------------------------------------------------------------
@@ -856,6 +860,8 @@ export async function POST(request) {
 
     materialsDeducted,
     materialsFlagged,
+
+    materialsSkippedNonInventory,
 
     checkpoint: {
       processedFrom:
@@ -879,12 +885,10 @@ export async function POST(request) {
       totalMaterialsSeen,
       materialsSkippedNoJob,
       materialsSkippedNoQty,
-      materialsSkippedLabor,
+      materialsSkippedNonInventory,
       batchSize: JOB_BATCH_SIZE,
       elapsed: elapsed(),
 
-      // Temporary diagnostic data.
-      // Remove this later once material matching is confirmed.
       sampleRawMaterials:
         sm8Materials.slice(0, 3),
     },
