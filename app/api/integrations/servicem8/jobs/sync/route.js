@@ -10,7 +10,7 @@ import {
 // ServiceM8 can take a while when batches are being processed.
 export const maxDuration = 60;
 
-const JOB_BATCH_SIZE = 10;
+const JOB_BATCH_SIZE = 3;
 const SYNC_WINDOW_DAYS = 14;
 
 /* ============================================================
