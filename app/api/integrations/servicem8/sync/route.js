@@ -73,7 +73,7 @@ export async function POST(request) {
   // history. Materials from a job finished years ago aren't relevant to
   // today's stock levels, and pulling everything makes each sync slow
   // and easy to exceed the function's time limit.
-  const SYNC_WINDOW_DAYS = 90;
+  const SYNC_WINDOW_DAYS = 14;
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - SYNC_WINDOW_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
