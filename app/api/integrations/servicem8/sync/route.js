@@ -92,7 +92,7 @@ export async function POST(request) {
   const t0 = Date.now();
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-  const { access_token } = await request.json().catch(() => ({}));
+  const { access_token, start_date, end_date } = await request.json().catch(() => ({}));
   if (!access_token) {
     return NextResponse.json({ error: "Missing session." }, { status: 401 });
   }
@@ -145,14 +145,33 @@ export async function POST(request) {
     return NextResponse.json({ error: "No Main Warehouse location found for this org — set one up before syncing." }, { status: 400 });
   }
 
-  // Only pull recent/active work — not the company's entire ServiceM8
-  // history. Materials from a job finished years ago aren't relevant to
-  // today's stock levels, and pulling everything makes each sync slow
-  // and easy to exceed the function's time limit.
-  const SYNC_WINDOW_DAYS = 90;
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - SYNC_WINDOW_DAYS);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  // Date range now comes from the UI's date-range picker instead of a
+  // fixed lookback — capped at 30 days per request so a single sync can't
+  // pull in a huge batch and blow past the route's time limit. Falls back
+  // to "last 30 days" if the caller doesn't supply one (defensive only —
+  // the UI always sends both dates via the picker modal).
+  let cutoffStr, endStr;
+  if (start_date || end_date) {
+    const start = start_date ? new Date(start_date) : null;
+    const end = end_date ? new Date(end_date) : null;
+    if (!start || Number.isNaN(start.getTime()) || !end || Number.isNaN(end.getTime())) {
+      return NextResponse.json({ error: "Invalid start or end date." }, { status: 400 });
+    }
+    if (start > end) {
+      return NextResponse.json({ error: "Start date must be before end date." }, { status: 400 });
+    }
+    const rangeDays = (end - start) / (1000 * 60 * 60 * 24);
+    if (rangeDays > 30) {
+      return NextResponse.json({ error: "Date range can't be more than 30 days." }, { status: 400 });
+    }
+    cutoffStr = start.toISOString().slice(0, 10);
+    endStr = end.toISOString().slice(0, 10);
+  } else {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 30);
+    cutoffStr = cutoff.toISOString().slice(0, 10);
+    endStr = new Date().toISOString().slice(0, 10);
+  }
 
   let sm8Jobs, sm8Companies;
   try {
@@ -160,40 +179,43 @@ export async function POST(request) {
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
+  // fetchJobs only supports a lower bound (ServiceM8's filter API only
+  // offers `gt`), so the upper bound of the range is applied here instead.
+  sm8Jobs = (sm8Jobs || []).filter((j) => !j.date || j.date.slice(0, 10) <= endStr);
   console.log(`[sm8 sync] fetched ${sm8Jobs?.length ?? 0} jobs, ${sm8Companies?.length ?? 0} companies — ${elapsed()}`);
 
   const companyName = {};
   for (const c of sm8Companies || []) companyName[c.uuid] = c.name;
 
-  // Only pull real, committed work as job records — not quotes still being
-  // negotiated, and not jobs marked Unsuccessful (no work was actually
-  // done, so there's nothing to reflect in inventory). ServiceM8's actual
-  // status values are exactly: Quote, Work Order, Completed, Unsuccessful
-  // — there's no "Cancelled" status, despite what an earlier version of
-  // this filter assumed.
+  // Skip quotes and cancelled jobs — only pull real work. Note: we don't
+  // filter on ServiceM8's "active" flag — it goes to 0 once a job is marked
+  // Completed, which is exactly the job state we most want to sync (that's
+  // when materials used are finalized).
   //
   // Also skip ServiceM8's own built-in "SAMPLE · Help Guide Job" — every new
   // ServiceM8 account gets one automatically, with placeholder tooltip text
   // as fake material line items ("click produce invoice to...", etc). It's
   // not real customer work, so it shouldn't show up in Jobs or generate
   // "Needs Review" noise on every sync.
+  // BUGFIX-002: a job deleted from SDR leaves no trace of its
+  // servicem8_job_uuid in `jobs` (cascade delete), so without this
+  // exclusion it looks identical to a job ServiceM8 has never sent
+  // before — the sync would re-import it and re-deduct every material
+  // on it. See supabase/010_prevent_resync_of_deleted_jobs.sql.
+  const { data: deletedTombstones } = await admin
+    .from("servicem8_deleted_jobs")
+    .select("servicem8_job_uuid")
+    .eq("org_id", profile.org_id);
+  const deletedUuids = new Set((deletedTombstones || []).map((t) => t.servicem8_job_uuid));
+
   const relevantJobs = (sm8Jobs || []).filter((j) => {
-    if (!j.uuid || !j.status) return false;
-    if (j.status !== "Work Order" && j.status !== "Completed") return false;
+    if (!j.uuid || !j.status || j.status === "Quote" || j.status === "Cancelled") return false;
+    if (deletedUuids.has(j.uuid)) return false;
     const jobNo = (j.generated_job_id || "").trim().toUpperCase();
     const client = (companyName[j.company_uuid] || "").trim().toLowerCase();
     if (jobNo === "SAMPLE" || client.includes("help guide")) return false;
     return true;
   });
-
-  // Materials only get fetched/deducted for jobs that are actually
-  // Completed — a Work Order job still shows up in the Jobs list (so you
-  // can see upcoming/in-progress work), but its parts usage isn't final
-  // yet, so nothing should be pulled from inventory for it. This mirrors
-  // how ServiceM8 itself treats Completed as "ready to invoice" — deducting
-  // stock any earlier risks decrementing parts that haven't actually left
-  // the warehouse if a job gets modified before completion.
-  const completedJobUuids = new Set(relevantJobs.filter((j) => j.status === "Completed").map((j) => j.uuid));
 
   const { data: existingJobs } = await admin
     .from("jobs")
@@ -240,9 +262,8 @@ export async function POST(request) {
   // fetch and the final bulk write below — 38s here, out of the route's
   // 60s hard cap, leaves ~22s for everything else.
   const materialsDeadline = t0 + 38_000;
-  const jobUuidsForMaterials = Object.keys(jobIdByUuid).filter((uuid) => completedJobUuids.has(uuid));
   const [materialsResult, catalogResult] = await Promise.allSettled([
-    fetchJobMaterialsForJobs(sm8Token, jobUuidsForMaterials, materialsDeadline),
+    fetchJobMaterialsForJobs(sm8Token, Object.keys(jobIdByUuid), materialsDeadline),
     fetchMaterialsCatalog(sm8Token),
   ]);
 
@@ -250,7 +271,7 @@ export async function POST(request) {
     return NextResponse.json({ error: materialsResult.reason?.message || "Materials fetch failed." }, { status: 502 });
   }
   const sm8Materials = materialsResult.value;
-  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${jobUuidsForMaterials.length} completed jobs (${Object.keys(jobIdByUuid).length} jobs known total) — ${elapsed()}`);
+  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs — ${elapsed()}`);
 
   // Bundle headers ("$JOBMATERIAL" rollup rows) aren't physical inventory —
   // see isBundleHeader's comment. Build the header-uuid set once for the
