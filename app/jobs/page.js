@@ -282,7 +282,11 @@ export default function JobsPage() {
                   {filtered.map((j) => {
                     const t = lineTotals(j.job_line_items || []);
                     return (
-                      <tr key={j.id} className="border-t border-slate-800/70 hover:bg-slate-900/40">
+                      <tr
+                        key={j.id}
+                        onClick={() => router.push(`/jobs/${j.id}`)}
+                        className="border-t border-slate-800/70 hover:bg-slate-900/40 cursor-pointer"
+                      >
                         <Td className="f-mono text-orange-400">{j.job_no}</Td>
                         <Td className="text-slate-200">{j.client}</Td>
                         <Td className="text-slate-400 text-xs max-w-[180px] truncate">{j.address || "—"}</Td>
@@ -291,7 +295,7 @@ export default function JobsPage() {
                         <Td className="text-right f-mono text-slate-300">{money(t.cost)}</Td>
                         <Td className="text-right f-mono text-emerald-400">{money(t.sale)}</Td>
                         <Td className="text-slate-400">{fmtDate(j.job_date)}</Td>
-                        <Td>
+                        <Td onClick={(e) => e.stopPropagation()}>
                           <div className="flex gap-1.5 justify-end">
                             <IconBtn onClick={() => openEdit(j)}><Pencil size={13} /></IconBtn>
                             <IconBtn danger onClick={() => setConfirmDelete(j)}><Trash2 size={13} /></IconBtn>
