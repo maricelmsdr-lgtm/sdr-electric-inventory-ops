@@ -296,8 +296,20 @@ export async function POST(request) {
     .not("servicem8_material_uuid", "is", null);
   const syncedUuids = new Set((alreadySyncedLines || []).map((l) => l.servicem8_material_uuid));
 
-  const { data: alreadyFlagged } = await admin.from("unmatched_materials").select("servicem8_material_uuid");
-  const flaggedUuids = new Set((alreadyFlagged || []).map((f) => f.servicem8_material_uuid));
+  // Only a FINAL human decision (resolved or explicitly ignored) permanently
+  // excludes a material. A "pending" Needs Review flag does NOT — matching
+  // has kept improving (aliases, catalog-code lookup, bundle/non-inventory
+  // filtering all landed after some materials were already flagged), so
+  // pending items get retried against the current matching logic on every
+  // sync instead of being stuck forever with whatever the matcher could do
+  // the first time it saw them. process_synced_materials upserts rather
+  // than blind-inserts, so a retry that still fails doesn't create a
+  // duplicate row — it just updates the existing pending one.
+  const { data: alreadyDecided } = await admin
+    .from("unmatched_materials")
+    .select("servicem8_material_uuid")
+    .in("status", ["resolved", "ignored"]);
+  const decidedUuids = new Set((alreadyDecided || []).map((f) => f.servicem8_material_uuid));
 
   // Match materials to the parts catalog, then hand the whole resolved
   // batch to Postgres in ONE call instead of one HTTP round trip per line.
@@ -319,7 +331,7 @@ export async function POST(request) {
 
   const candidateMaterials = (sm8Materials || []).filter((m) => {
     if (!m.uuid) { materialsSkippedNoJob++; return false; } // malformed line from the API, essentially never happens
-    if (syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) { materialsSkippedDuplicate++; return false; }
+    if (syncedUuids.has(m.uuid) || decidedUuids.has(m.uuid)) { materialsSkippedDuplicate++; return false; }
     if (isBundleHeader(m, bundleHeaderUuids)) { materialsSkippedBundleHeader++; return false; }
     if (isNonInventoryCharge(m.name)) { materialsSkippedNonInventory++; return false; }
     return true;
