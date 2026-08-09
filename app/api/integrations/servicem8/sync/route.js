@@ -60,16 +60,32 @@ function isBundleHeader(material, bundleHeaderUuids) {
   if (!material?.uuid) return false;
   if (bundleHeaderUuids.has(String(material.uuid))) return true;
   const name = normalize(material.name);
-  return name === "$jobmaterial" || name === "jobmaterial" || name === "materials";
+  if (name === "$jobmaterial" || name === "jobmaterial" || name === "materials") return true;
+  // Fallback for cases where the structural link isn't available this run
+  // (e.g. the bundle's children weren't in this batch) — ServiceM8 marks
+  // these rollup/placeholder rows inactive (active: 0) even standalone,
+  // distinct from a real material that's just out of stock or deleted for
+  // an unrelated reason. A generic name like "Project based Materials"
+  // combined with active: 0 is the same "this isn't a real part" signal.
+  if (Number(material.active) === 0 && /materials?$/i.test(name)) return true;
+  return false;
 }
 
 // Catches cases like "SUBMERSIBLE 4-WIRE CLEAR HEAT SHRINK SPLICE KIT
 // HSKC-4" where the real part number/SKU is embedded at the end of an
-// otherwise-descriptive name — pulls out hyphen/underscore/slash-joined
-// alphanumeric tokens as match candidates.
+// otherwise-descriptive name. Two passes: first the confident one
+// (hyphen/underscore/slash-joined tokens like "HSKC-4" or "F/UVMAX" —
+// that punctuation is a strong signal it's a code, not English prose),
+// then a looser fallback (a single run of 5+ letters-and-digits mixed,
+// like "114X8CPEXTTUBESJN") tried only if nothing from the first pass
+// matched a real part — mixed letters+digits of that length essentially
+// never occurs in ordinary description text, so it's safe as a last resort.
 function extractCodeTokens(text) {
-  const matches = String(text ?? "").match(/\b[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+\b/g);
-  return matches || [];
+  const value = String(text ?? "");
+  const punctuated = value.match(/\b[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+\b/g) || [];
+  const looseCandidates = value.match(/\b[A-Za-z0-9]{5,}\b/g) || [];
+  const loose = looseCandidates.filter((t) => /[A-Za-z]/.test(t) && /[0-9]/.test(t));
+  return [...punctuated, ...loose];
 }
 
 export async function POST(request) {
@@ -297,11 +313,13 @@ export async function POST(request) {
   let materialsSkippedNoQty = 0;
   let materialsSkippedBundleHeader = 0;
   let materialsSkippedNonInventory = 0;
+  let materialsSkippedDuplicate = 0;
   const totalMaterialsSeen = (sm8Materials || []).length;
   const matchMethodCounts = {};
 
   const candidateMaterials = (sm8Materials || []).filter((m) => {
-    if (!m.uuid || syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) return false;
+    if (!m.uuid) { materialsSkippedNoJob++; return false; } // malformed line from the API, essentially never happens
+    if (syncedUuids.has(m.uuid) || flaggedUuids.has(m.uuid)) { materialsSkippedDuplicate++; return false; }
     if (isBundleHeader(m, bundleHeaderUuids)) { materialsSkippedBundleHeader++; return false; }
     if (isNonInventoryCharge(m.name)) { materialsSkippedNonInventory++; return false; }
     return true;
@@ -397,8 +415,12 @@ export async function POST(request) {
       materialsSkippedNoQty,
       materialsSkippedBundleHeader,
       materialsSkippedNonInventory,
+      materialsSkippedDuplicate,
       matchMethodCounts,
       catalogAvailable,
+      // Small sample for the debug panel — not full raw dumps, just enough
+      // to eyeball what ServiceM8 actually sent if matching looks off.
+      sampleRawMaterials: (sm8Materials || []).slice(0, 5),
     },
   });
 }
