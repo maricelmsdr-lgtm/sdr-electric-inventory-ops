@@ -3,7 +3,8 @@ import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
-import { Badge, PrimaryBtn, inputCls } from "@/components/ui";
+import { Badge, PrimaryBtn, inputCls, ModalShell, Field } from "@/components/ui";
+import { Plug, Calendar } from "lucide-react";
 
 const PROVIDERS = [
   { key: "qbo", name: "QuickBooks Online", blurb: "Sync parts costs, POs, and job invoices to your books.", color: "text-emerald-400", border: "border-emerald-400/30", live: false },
@@ -46,6 +47,11 @@ function IntegrationsPageInner() {
   const [rawDebug, setRawDebug] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [showDateModal, setShowDateModal] = useState(false);
+  const [rangeStart, setRangeStart] = useState("");
+  const [rangeEnd, setRangeEnd] = useState("");
+  const [rangeError, setRangeError] = useState("");
+  const [syncingProducts, setSyncingProducts] = useState(false);
   const [unmatched, setUnmatched] = useState([]);
   const [parts, setParts] = useState([]);
   const [resolveChoice, setResolveChoice] = useState({}); // { [unmatchedId]: partId }
@@ -179,7 +185,7 @@ function IntegrationsPageInner() {
     }
   };
 
-  const syncServiceM8 = async () => {
+  const syncServiceM8 = async (startDate, endDate) => {
     setSyncing(true);
     setError("");
     setNotice("");
@@ -198,7 +204,7 @@ function IntegrationsPageInner() {
         res = await fetch("/api/integrations/servicem8/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ access_token: session.access_token }),
+          body: JSON.stringify({ access_token: session.access_token, start_date: startDate, end_date: endDate }),
           signal: controller.signal,
         });
       } finally {
@@ -232,6 +238,67 @@ function IntegrationsPageInner() {
       setError(e.name === "AbortError" ? "Sync timed out — try again in a minute." : "Something went wrong while syncing.");
     } finally {
       setSyncing(false);
+    }
+  };
+
+  const openSyncJobsModal = () => {
+    // Default to a sensible last-30-days range so the fields aren't empty.
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 30);
+    setRangeStart(start.toISOString().slice(0, 10));
+    setRangeEnd(end.toISOString().slice(0, 10));
+    setRangeError("");
+    setShowDateModal(true);
+  };
+
+  const confirmSyncJobs = () => {
+    if (!rangeStart || !rangeEnd) {
+      setRangeError("Pick both a start and end date.");
+      return;
+    }
+    if (new Date(rangeStart) > new Date(rangeEnd)) {
+      setRangeError("Start date must be before end date.");
+      return;
+    }
+    const rangeDays = (new Date(rangeEnd) - new Date(rangeStart)) / (1000 * 60 * 60 * 24);
+    if (rangeDays > 30) {
+      setRangeError("Date range can't be more than 30 days.");
+      return;
+    }
+    setShowDateModal(false);
+    syncServiceM8(rangeStart, rangeEnd);
+  };
+
+  // Pulls ServiceM8's Materials & Services catalog into our own `parts`
+  // table (create-or-update by servicem8_material_uuid). Unlike the jobs
+  // sync, this isn't date-bound — it's a full account-wide catalog pull.
+  const syncProducts = async () => {
+    setSyncingProducts(true);
+    setError("");
+    setNotice("");
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session?.access_token) {
+        setError("Your session expired — please refresh and try again.");
+        return;
+      }
+      const res = await fetch("/api/integrations/servicem8/sync-products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ access_token: session.access_token }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) {
+        setError(body.error || `Product sync failed (status ${res.status}).`);
+      } else {
+        setNotice(`Synced products: ${body.productsCreated} new, ${body.productsUpdated} updated.`);
+        await fetchIntegrations();
+      }
+    } catch {
+      setError("Something went wrong syncing products.");
+    } finally {
+      setSyncingProducts(false);
     }
   };
 
@@ -321,27 +388,85 @@ function IntegrationsPageInner() {
         {loading ? (
           <div className="text-sm text-slate-500">Loading integrations...</div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {PROVIDERS.map((i) => {
-              const connected = isConnected(i.key);
+          <>
+            {/* ServiceM8 — the one real, live integration — gets its own
+                hero card matching the target design: centered icon, status
+                pill, and the two real actions (Sync Jobs / Sync Products)
+                instead of buried in a grid with the demo-only providers. */}
+            {(() => {
+              const connected = isConnected("servicem8");
               return (
-                <div key={i.key} className={`bg-slate-900/70 border ${i.border} rounded-lg p-5`}>
-                  <div className="flex items-center justify-between mb-2">
-                    <h4 className={`f-display uppercase text-lg ${i.color}`}>{i.name}</h4>
-                    <Badge className={connected ? "border-emerald-400/30 text-emerald-400" : "border-slate-600 text-slate-500"}>
-                      {connected ? "Connected" : "Not Connected"}
-                    </Badge>
+                <div className="max-w-md mx-auto bg-slate-900/70 border border-sky-400/30 rounded-lg p-6 text-center mb-8">
+                  <div className="w-16 h-16 rounded-full bg-sky-400/10 flex items-center justify-center mx-auto mb-4">
+                    <Plug size={26} className="text-sky-400" />
                   </div>
-                  <p className="text-sm text-slate-400 mb-1">{i.blurb}</p>
-                  <p className="text-[11px] f-mono uppercase tracking-wide mb-4 text-slate-600">
-                    {i.live ? "Real OAuth connection" : "Status tracker only — not a live API connection"}
-                  </p>
-                  <div className="flex items-center gap-2 flex-wrap">
+                  <h4 className="f-display uppercase text-xl text-slate-100 mb-1">ServiceM8 Integration</h4>
+                  <p className="text-sm text-slate-400 mb-4">Connect and sync with your ServiceM8 account</p>
+                  <Badge className={connected ? "border-emerald-400/30 text-emerald-400" : "border-slate-600 text-slate-500"}>
+                    {connected ? "Connected" : "Not Connected"}
+                  </Badge>
+
+                  <div className="mt-5">
                     <button
-                      onClick={() => {
-                        if (i.key === "servicem8") return connected ? disconnectServiceM8() : connectServiceM8();
-                        return toggle(i.key, i.name);
-                      }}
+                      onClick={connected ? disconnectServiceM8 : connectServiceM8}
+                      disabled={busyKey === "servicem8"}
+                      className={`w-full text-sm f-display uppercase tracking-wide px-4 py-2.5 rounded transition-colors disabled:opacity-50 ${
+                        connected
+                          ? "bg-red-600 hover:bg-red-500 text-white"
+                          : "bg-orange-600 hover:bg-orange-500 text-white"
+                      }`}
+                    >
+                      {busyKey === "servicem8" ? "Working..." : connected ? "Disconnect from ServiceM8" : "Connect to ServiceM8"}
+                    </button>
+                  </div>
+
+                  {connected && (
+                    <div className="flex gap-3 mt-3">
+                      <button
+                        onClick={openSyncJobsModal}
+                        disabled={syncing}
+                        className="flex-1 text-sm f-display uppercase tracking-wide px-4 py-2.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+                      >
+                        {syncing ? "Syncing..." : "Sync Jobs"}
+                      </button>
+                      <button
+                        onClick={syncProducts}
+                        disabled={syncingProducts}
+                        className="flex-1 text-sm f-display uppercase tracking-wide px-4 py-2.5 rounded bg-sky-600 hover:bg-sky-500 text-white disabled:opacity-50"
+                      >
+                        {syncingProducts ? "Syncing..." : "Sync Products"}
+                      </button>
+                    </div>
+                  )}
+
+                  {connected && lastSyncedAt && (
+                    <p className="text-[11px] f-mono text-slate-600 mt-3">
+                      Last synced: {new Date(lastSyncedAt).toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* Everything else stays as status-tracker demo cards — not
+                live API connections, unchanged from before. */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {PROVIDERS.filter((i) => i.key !== "servicem8").map((i) => {
+                const connected = isConnected(i.key);
+                return (
+                  <div key={i.key} className={`bg-slate-900/70 border ${i.border} rounded-lg p-5`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className={`f-display uppercase text-lg ${i.color}`}>{i.name}</h4>
+                      <Badge className={connected ? "border-emerald-400/30 text-emerald-400" : "border-slate-600 text-slate-500"}>
+                        {connected ? "Connected" : "Not Connected"}
+                      </Badge>
+                    </div>
+                    <p className="text-sm text-slate-400 mb-1">{i.blurb}</p>
+                    <p className="text-[11px] f-mono uppercase tracking-wide mb-4 text-slate-600">
+                      Status tracker only — not a live API connection
+                    </p>
+                    <button
+                      onClick={() => toggle(i.key, i.name)}
                       disabled={busyKey === i.key}
                       className={`text-sm f-display uppercase tracking-wide px-3.5 py-2 rounded border transition-colors disabled:opacity-50 ${
                         connected
@@ -351,21 +476,32 @@ function IntegrationsPageInner() {
                     >
                       {busyKey === i.key ? "Working..." : connected ? "Disconnect" : "Connect"}
                     </button>
-                    {i.key === "servicem8" && connected && (
-                      <PrimaryBtn onClick={syncServiceM8} disabled={syncing}>
-                        {syncing ? "Syncing..." : "Sync Now"}
-                      </PrimaryBtn>
-                    )}
                   </div>
-                  {i.key === "servicem8" && connected && lastSyncedAt && (
-                    <p className="text-[11px] f-mono text-slate-600 mt-2">
-                      Last synced: {new Date(lastSyncedAt).toLocaleString()}
-                    </p>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        {showDateModal && (
+          <ModalShell title="Select Date Range (Max 30 Days)" icon={Calendar} onClose={() => setShowDateModal(false)}>
+            {rangeError && <div className="text-sm text-red-400 mb-3">{rangeError}</div>}
+            <Field label="Start Date">
+              <input type="date" className={inputCls} value={rangeStart} onChange={(e) => setRangeStart(e.target.value)} />
+            </Field>
+            <Field label="End Date">
+              <input type="date" className={inputCls} value={rangeEnd} onChange={(e) => setRangeEnd(e.target.value)} />
+            </Field>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowDateModal(false)}
+                className="text-sm f-display uppercase tracking-wide px-4 py-2 rounded border border-slate-700 text-slate-400 hover:bg-slate-800"
+              >
+                Cancel
+              </button>
+              <PrimaryBtn onClick={confirmSyncJobs}>Sync</PrimaryBtn>
+            </div>
+          </ModalShell>
         )}
 
         {unmatched.length > 0 && (
