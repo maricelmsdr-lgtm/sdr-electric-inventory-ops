@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   Zap, LayoutDashboard, Briefcase, Package, Truck, Warehouse, ShoppingCart,
   ArrowLeftRight, ClipboardList, SlidersHorizontal, ListChecks,
-  PackagePlus, History, LogOut, BarChart3, ScanLine, Plug, Menu, X, RefreshCw,
+  PackagePlus, History, LogOut, BarChart3, ScanLine, Plug, Menu, X, RefreshCw, Building2,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -30,6 +30,7 @@ const NAV_GROUPS = [
     items: [
       { href: "/jobs", label: "Jobs", icon: Briefcase },
       { href: "/purchase-orders", label: "Purchase Orders", icon: ShoppingCart },
+      { href: "/vendors", label: "Vendors", icon: Building2 },
       { href: "/loadouts", label: "Load Out", icon: ArrowLeftRight },
       { href: "/field-requests", label: "Field Requests", icon: ClipboardList },
     ],

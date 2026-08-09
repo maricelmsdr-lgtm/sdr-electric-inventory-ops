@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Search, X, AlertTriangle, Zap, Droplets, Wind, Package } from "lucide-react";
+import { Search, X, AlertTriangle, Zap, Droplets, Wind, Package, MoreVertical } from "lucide-react";
 
 export const TRADE_STYLES = {
   Electrical: { text: "text-amber-400", bg: "bg-amber-400/10", border: "border-amber-400/30", dot: "bg-amber-400", icon: Zap },
@@ -233,6 +233,45 @@ export function PartPicker({ parts, value, onChange, placeholder = "Type part no
             </button>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+// Small "..." row-action menu (Edit / Deactivate / Delete, etc.) — used by
+// screens with more actions per row than fit as inline icon buttons, e.g.
+// Vendors. `trigger` defaults to a MoreVertical dots icon if omitted.
+export function DropdownMenu({ trigger, items, align = "right" }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative inline-block text-left">
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        className="p-1.5 rounded text-slate-500 hover:text-slate-200 hover:bg-slate-800"
+      >
+        {trigger || <MoreVertical size={15} />}
+      </button>
+      {open && (
+        <>
+          {/* Click-outside catcher — sits under the menu, above everything else */}
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            className={`absolute z-50 mt-1 ${align === "right" ? "right-0" : "left-0"} bg-slate-900 border border-slate-700 rounded shadow-lg min-w-[170px] py-1`}
+          >
+            {items.map((it, idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setOpen(false); it.onClick(); }}
+                className={`w-full text-left px-3 py-2 text-sm hover:bg-slate-800 flex items-center gap-2 ${it.danger ? "text-red-400" : "text-slate-200"}`}
+              >
+                {it.icon && <it.icon size={14} />}
+                {it.label}
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
