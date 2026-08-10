@@ -2,8 +2,7 @@ import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJobs, fetchCompanies, fetchMaterialsCatalog } from "@/lib/servicem8";
 
-// Retrying through a rate limit can take a while (see sm8Fetch's backoff),
-// so give this route more room than the default 10s.
+// Retrying through a rate limit can take a while (see sm8Fetch's backoff),// so give this route more room than the default 10s.
 export const maxDuration = 60;
 
 /* ============================================================
@@ -18,12 +17,11 @@ function normalize(value) {
     .replace(/\s+/g, " ");
 }
 
-// ServiceM8 sends labor, travel, and service-call charges through the same
-// jobmaterial endpoint as real parts. These aren't inventory — matching them
+// ServiceM8 sends labor, travel, and service-call charges through the same// jobmaterial endpoint as real parts. These aren't inventory â€” matching them
 // against the parts catalog would either wrongly deduct a real part's stock
 // (false positive) or just pile up as permanent "no match" noise in Needs
 // Review (since there's no part named "Technician Labour After Hours").
-// Skipped entirely, not flagged — there's nothing here to review.
+// Skipped entirely, not flagged â€” there's nothing here to review.
 function isNonInventoryCharge(name) {
   const value = normalize(name);
   if (!value) return false;
@@ -47,14 +45,11 @@ function isNonInventoryCharge(name) {
   return false;
 }
 
-// ServiceM8 represents a "Job Material Bundle" (e.g. one invoice line like
-// "$JOBMATERIAL — Materials 8 inch black nylon cable ties and wire spice
-// kit") as several separate jobmaterial rows: one HEADER row (the bundle
-// itself — not physical inventory) plus several CHILD rows underneath it
-// (the actual parts, e.g. TYWRAP8MOUNTBLK, HSK4 — these ARE inventory).
+// ServiceM8 represents a "Job Material Bundle" (e.g. one invoice line like// "$JOBMATERIAL â€” Materials 8 inch black nylon cable ties and wire spice// kit") as several separate jobmaterial rows: one HEADER row (the bundle
+// itself â€” not physical inventory) plus several CHILD rows underneath it// (the actual parts, e.g. TYWRAP8MOUNTBLK, HSK4 â€” these ARE inventory).
 // Every child's job_material_bundle_uuid points at the header's own uuid.
 // So: collect every job_material_bundle_uuid value seen across the batch,
-// then any material whose OWN uuid appears in that set is a header — skip
+// then any material whose OWN uuid appears in that set is a header â€” skip
 // it entirely (it's just a rollup label, not a real deduction).
 function isBundleHeader(material, bundleHeaderUuids) {
   if (!material?.uuid) return false;
@@ -62,8 +57,7 @@ function isBundleHeader(material, bundleHeaderUuids) {
   const name = normalize(material.name);
   if (name === "$jobmaterial" || name === "jobmaterial" || name === "materials") return true;
   // Fallback for cases where the structural link isn't available this run
-  // (e.g. the bundle's children weren't in this batch) — ServiceM8 marks
-  // these rollup/placeholder rows inactive (active: 0) even standalone,
+  // (e.g. the bundle's children weren't in this batch) â€” ServiceM8 marks  // these rollup/placeholder rows inactive (active: 0) even standalone,
   // distinct from a real material that's just out of stock or deleted for
   // an unrelated reason. A generic name like "Project based Materials"
   // combined with active: 0 is the same "this isn't a real part" signal.
@@ -74,11 +68,11 @@ function isBundleHeader(material, bundleHeaderUuids) {
 // Catches cases like "SUBMERSIBLE 4-WIRE CLEAR HEAT SHRINK SPLICE KIT
 // HSKC-4" where the real part number/SKU is embedded at the end of an
 // otherwise-descriptive name. Two passes: first the confident one
-// (hyphen/underscore/slash-joined tokens like "HSKC-4" or "F/UVMAX" —
+// (hyphen/underscore/slash-joined tokens like "HSKC-4" or "F/UVMAX" â€”
 // that punctuation is a strong signal it's a code, not English prose),
 // then a looser fallback (a single run of 5+ letters-and-digits mixed,
 // like "114X8CPEXTTUBESJN") tried only if nothing from the first pass
-// matched a real part — mixed letters+digits of that length essentially
+// matched a real part â€” mixed letters+digits of that length essentially
 // never occurs in ordinary description text, so it's safe as a last resort.
 function extractCodeTokens(text) {
   const value = String(text ?? "");
@@ -142,14 +136,13 @@ export async function POST(request) {
     .eq("code", "MAIN")
     .single();
   if (!mainLoc?.id) {
-    return NextResponse.json({ error: "No Main Warehouse location found for this org — set one up before syncing." }, { status: 400 });
+    return NextResponse.json({ error: "No Main Warehouse location found for this org â€” set one up before syncing." }, { status: 400 });
   }
 
   // Date range now comes from the UI's date-range picker instead of a
-  // fixed lookback — capped at 30 days per request so a single sync can't
+  // fixed lookback â€” capped at 30 days per request so a single sync can't
   // pull in a huge batch and blow past the route's time limit. Falls back
-  // to "last 30 days" if the caller doesn't supply one (defensive only —
-  // the UI always sends both dates via the picker modal).
+  // to "last 30 days" if the caller doesn't supply one (defensive only â€”  // the UI always sends both dates via the picker modal).
   let cutoffStr, endStr;
   if (start_date || end_date) {
     const start = start_date ? new Date(start_date) : null;
@@ -180,27 +173,23 @@ export async function POST(request) {
     return NextResponse.json({ error: e.message }, { status: 502 });
   }
   // fetchJobs only supports a lower bound (ServiceM8's filter API only
-  // offers `gt`), so the upper bound of the range is applied here instead.
-  sm8Jobs = (sm8Jobs || []).filter((j) => !j.date || j.date.slice(0, 10) <= endStr);
-  console.log(`[sm8 sync] fetched ${sm8Jobs?.length ?? 0} jobs, ${sm8Companies?.length ?? 0} companies — ${elapsed()}`);
+  // offers `gt`), so the upper bound of the range is applied here instead.  sm8Jobs = (sm8Jobs || []).filter((j) => !j.date || j.date.slice(0, 10) <= endStr);
+  console.log(`[sm8 sync] fetched ${sm8Jobs?.length ?? 0} jobs, ${sm8Companies?.length ?? 0} companies â€” ${elapsed()}`);
 
   const companyName = {};
   for (const c of sm8Companies || []) companyName[c.uuid] = c.name;
 
-  // Skip quotes and cancelled jobs — only pull real work. Note: we don't
-  // filter on ServiceM8's "active" flag — it goes to 0 once a job is marked
-  // Completed, which is exactly the job state we most want to sync (that's
-  // when materials used are finalized).
+  // Skip quotes and cancelled jobs â€” only pull real work. Note: we don't  // filter on ServiceM8's "active" flag â€” it goes to 0 once a job is marked
+  // Completed, which is exactly the job state we most want to sync (that's  // when materials used are finalized).
   //
-  // Also skip ServiceM8's own built-in "SAMPLE · Help Guide Job" — every new
+  // Also skip ServiceM8's own built-in "SAMPLE Â· Help Guide Job" â€” every new
   // ServiceM8 account gets one automatically, with placeholder tooltip text
-  // as fake material line items ("click produce invoice to...", etc). It's
-  // not real customer work, so it shouldn't show up in Jobs or generate
+  // as fake material line items ("click produce invoice to...", etc). It's  // not real customer work, so it shouldn't show up in Jobs or generate
   // "Needs Review" noise on every sync.
   // BUGFIX-002: a job deleted from SDR leaves no trace of its
   // servicem8_job_uuid in `jobs` (cascade delete), so without this
   // exclusion it looks identical to a job ServiceM8 has never sent
-  // before — the sync would re-import it and re-deduct every material
+  // before â€” the sync would re-import it and re-deduct every material
   // on it. See supabase/010_prevent_resync_of_deleted_jobs.sql.
   const { data: deletedTombstones } = await admin
     .from("servicem8_deleted_jobs")
@@ -225,7 +214,7 @@ export async function POST(request) {
   const jobIdByUuid = Object.fromEntries((existingJobs || []).map((j) => [j.servicem8_job_uuid, j.id]));
   const preExistingUuids = new Set(Object.keys(jobIdByUuid));
 
-  // Upsert every job in ONE call instead of one HTTP round trip per job —
+  // Upsert every job in ONE call instead of one HTTP round trip per job â€”
   // with a few hundred jobs in a 90-day window, that per-row approach was
   // most of what blew past Vercel's 60s limit. See supabase/007_bulk_sync_functions.sql.
   let jobsCreated = 0;
@@ -250,16 +239,15 @@ export async function POST(request) {
       else jobsCreated++;
     }
   }
-  console.log(`[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`);
+  console.log(`[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) â€” ${elapsed()}`);
 
-  // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query —
+  // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query â€”
   // an unfiltered bulk call doesn't reliably return everything), and the
-  // materials catalog, CONCURRENTLY — they're independent ServiceM8 calls,
+  // materials catalog, CONCURRENTLY â€” they're independent ServiceM8 calls,
   // and running the catalog fetch after materials used to just add its
   // duration on top sequentially. deadlineMs is measured from the route's
   // own start (t0), not from when this call begins, so it accounts for
-  // time already spent on setup/job-upsert and leaves room for the catalog
-  // fetch and the final bulk write below — 38s here, out of the route's
+  // time already spent on setup/job-upsert and leaves room for the catalog  // fetch and the final bulk write below â€” 38s here, out of the route's
   // 60s hard cap, leaves ~22s for everything else.
   const materialsDeadline = t0 + 38_000;
   const [materialsResult, catalogResult] = await Promise.allSettled([
@@ -271,9 +259,9 @@ export async function POST(request) {
     return NextResponse.json({ error: materialsResult.reason?.message || "Materials fetch failed." }, { status: 502 });
   }
   const sm8Materials = materialsResult.value;
-  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs — ${elapsed()}`);
+  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs â€” ${elapsed()}`);
 
-  // Bundle headers ("$JOBMATERIAL" rollup rows) aren't physical inventory —
+  // Bundle headers ("$JOBMATERIAL" rollup rows) aren't physical inventory â€”
   // see isBundleHeader's comment. Build the header-uuid set once for the
   // whole batch.
   const bundleHeaderUuids = new Set(
@@ -281,11 +269,9 @@ export async function POST(request) {
   );
 
   // Materials catalog: ServiceM8 keeps the real item code (e.g.
-  // "TYWRAP8MOUNTBLK") separate from the jobmaterial line's human-readable
-  // name ("TYWRAP 8 BLACK WITH MOUNTING HOLE") — the code lives in a
+  // "TYWRAP8MOUNTBLK") separate from the jobmaterial line's human-readable  // name ("TYWRAP 8 BLACK WITH MOUNTING HOLE") â€” the code lives in a
   // separate catalog record referenced by material_uuid. Requires the
-  // read_inventory scope; if an org connected before that scope was added,
-  // this 403s and we fall back to name-only matching instead of failing
+  // read_inventory scope; if an org connected before that scope was added,  // this 403s and we fall back to name-only matching instead of failing
   // the whole sync.
   const catalogAvailable = catalogResult.status === "fulfilled";
   const sm8MaterialsCatalog = catalogAvailable ? catalogResult.value : [];
@@ -294,7 +280,7 @@ export async function POST(request) {
   }
   const catalogByUuid = {};
   for (const c of sm8MaterialsCatalog || []) catalogByUuid[c.uuid] = c;
-  console.log(`[sm8 sync] materials catalog: ${sm8MaterialsCatalog.length} items, available=${catalogAvailable} — ${elapsed()}`);
+  console.log(`[sm8 sync] materials catalog: ${sm8MaterialsCatalog.length} items, available=${catalogAvailable} â€” ${elapsed()}`);
 
   const { data: parts } = await admin
     .from("parts")
@@ -309,9 +295,8 @@ export async function POST(request) {
   }
 
   // Aliases learned from manual "Needs Review" resolutions (see
-  // resolveUnmatched in app/integrations/page.js) — once someone points
-  // "TYWRAP 8 BLACK WITH MOUNTING HOLE" at TYWRAP8MOUNTBLK one time, every
-  // future occurrence of that exact ServiceM8 name auto-matches without
+  // resolveUnmatched in app/integrations/page.js) â€” once someone points
+  // "TYWRAP 8 BLACK WITH MOUNTING HOLE" at TYWRAP8MOUNTBLK one time, every  // future occurrence of that exact ServiceM8 name auto-matches without
   // needing the catalog fetch or manual review again.
   const { data: aliases } = await admin
     .from("part_aliases")
@@ -324,21 +309,25 @@ export async function POST(request) {
   }
   console.log(`[sm8 sync] loaded ${aliases?.length ?? 0} learned part aliases`);
 
-  const { data: alreadySyncedLines } = await admin
-    .from("job_line_items")
-    .select("servicem8_material_uuid")
-    .not("servicem8_material_uuid", "is", null);
-  const syncedUuids = new Set((alreadySyncedLines || []).map((l) => l.servicem8_material_uuid));
+  // NOTE: previously this route also loaded `alreadySyncedLines` (every
+  // job_line_items row with a servicem8_material_uuid already set) and
+  // used it to drop any material we'd already synced once before. That
+  // meant a line whose ServiceM8 qty changed after the first sync (e.g.
+  // 2 -> 5) was silently ignored forever -- nothing extra ever got
+  // deducted. Diff-based deduction (010_diff_based_material_deduction.sql)
+  // now handles that INSIDE process_synced_materials: it looks up any
+  // existing job_line_items row for the same servicem8_material_uuid,
+  // deducts only the qty difference, and updates the stored qty. So we
+  // deliberately no longer filter out already-synced uuids here --  // every material line ServiceM8 currently reports gets sent through, and
+  // the database decides whether there's anything new to deduct.
 
   // Only a FINAL human decision (resolved or explicitly ignored) permanently
-  // excludes a material. A "pending" Needs Review flag does NOT — matching
-  // has kept improving (aliases, catalog-code lookup, bundle/non-inventory
-  // filtering all landed after some materials were already flagged), so
+  // excludes a material. A "pending" Needs Review flag does NOT â€” matching
+  // has kept improving (aliases, catalog-code lookup, bundle/non-inventory  // filtering all landed after some materials were already flagged), so
   // pending items get retried against the current matching logic on every
-  // sync instead of being stuck forever with whatever the matcher could do
-  // the first time it saw them. process_synced_materials upserts rather
+  // sync instead of being stuck forever with whatever the matcher could do  // the first time it saw them. process_synced_materials upserts rather
   // than blind-inserts, so a retry that still fails doesn't create a
-  // duplicate row — it just updates the existing pending one.
+  // duplicate row â€” it just updates the existing pending one.
   const { data: alreadyDecided } = await admin
     .from("unmatched_materials")
     .select("servicem8_material_uuid")
@@ -346,11 +335,9 @@ export async function POST(request) {
   const decidedUuids = new Set((alreadyDecided || []).map((f) => f.servicem8_material_uuid));
 
   // Match materials to the parts catalog, then hand the whole resolved
-  // batch to Postgres in ONE call instead of one HTTP round trip per line.
-  // Match order (first hit wins):
+  // batch to Postgres in ONE call instead of one HTTP round trip per line.  // Match order (first hit wins):
   //   1. Learned alias (exact name seen before, manually resolved once)
-  //   2. ServiceM8 catalog item code (via material_uuid → material.json)
-  //   3. Direct name/SKU/part_no match
+  //   2. ServiceM8 catalog item code (via material_uuid â†’ material.json)  //   3. Direct name/SKU/part_no match
   //   4. A code-shaped token embedded in the name (e.g. "HSKC-4" inside
   //      "SUBMERSIBLE 4-WIRE CLEAR HEAT SHRINK SPLICE KIT HSKC-4")
   let materialsDeducted = 0;
@@ -365,7 +352,7 @@ export async function POST(request) {
 
   const candidateMaterials = (sm8Materials || []).filter((m) => {
     if (!m.uuid) { materialsSkippedNoJob++; return false; } // malformed line from the API, essentially never happens
-    if (syncedUuids.has(m.uuid) || decidedUuids.has(m.uuid)) { materialsSkippedDuplicate++; return false; }
+    if (decidedUuids.has(m.uuid)) { materialsSkippedDuplicate++; return false; } // human already resolved/ignored this one for good
     if (isBundleHeader(m, bundleHeaderUuids)) { materialsSkippedBundleHeader++; return false; }
     if (isNonInventoryCharge(m.name)) { materialsSkippedNonInventory++; return false; }
     return true;
@@ -438,8 +425,8 @@ export async function POST(request) {
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) — ` +
-    `matched by: ${JSON.stringify(matchMethodCounts)} — skipped: ${materialsSkippedBundleHeader} bundle header(s), ${materialsSkippedNonInventory} non-inventory — ${elapsed()}`
+    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) â€” ` +
+    `matched by: ${JSON.stringify(matchMethodCounts)} â€” skipped: ${materialsSkippedBundleHeader} bundle header(s), ${materialsSkippedNonInventory} non-inventory â€” ${elapsed()}`
   );
 
   await admin.from("integrations").update({ last_synced_at: new Date().toISOString() }).eq("id", integration.id);
@@ -464,7 +451,7 @@ export async function POST(request) {
       materialsSkippedDuplicate,
       matchMethodCounts,
       catalogAvailable,
-      // Small sample for the debug panel — not full raw dumps, just enough
+      // Small sample for the debug panel â€” not full raw dumps, just enough
       // to eyeball what ServiceM8 actually sent if matching looks off.
       sampleRawMaterials: (sm8Materials || []).slice(0, 5),
     },
