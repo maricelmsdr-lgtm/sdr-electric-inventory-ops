@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
-import { Panel, Th, Td, Badge, money, PrimaryBtn, ModalShell, inputCls, ConfirmModal } from "@/components/ui";
+import { Panel, Th, Td, Badge, money, PrimaryBtn, ModalShell, inputCls, ConfirmModal, IconBtn } from "@/components/ui";
 
 const fmtDate = (d) => (d ? new Date(d + "T00:00:00").toLocaleDateString() : "—");
 
