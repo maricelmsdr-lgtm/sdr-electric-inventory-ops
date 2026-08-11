@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { X, Eye, EyeOff, Smartphone } from "lucide-react";
-import { createClient } from "@/lib/supabaseClient"; // ASSUMPTION: adjust to your actual client path
+import { supabase } from "@/lib/supabase";
 
 export default function AddUserModal({ onClose, onSaved }) {
   const [username, setUsername] = useState("");
@@ -24,7 +24,6 @@ export default function AddUserModal({ onClose, onSaved }) {
   }, []);
 
   async function loadLocations() {
-    const supabase = createClient();
     // ASSUMPTION: locations table has id, name — adjust to your schema
     const { data } = await supabase.from("locations").select("id, name");
     setLocations(data || []);
@@ -38,35 +37,31 @@ export default function AddUserModal({ onClose, onSaved }) {
     if (!email.trim()) return setError("Email is required.");
 
     setSaving(true);
-    const supabase = createClient();
 
     try {
-      // 1. Create the auth user
-      const { data: authData, error: authError } =
-        await supabase.auth.admin.createUser({
+      const res = await fetch("/api/users/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: username.trim(),
           email: email.trim(),
           password,
-          email_confirm: true,
-        });
-
-      if (authError) throw authError;
-
-      // 2. Create the profile row
-      // ASSUMPTION: profiles table columns — adjust to your real schema
-      const { error: profileError } = await supabase.from("profiles").insert({
-        id: authData.user.id,
-        username: username.trim(),
-        email: email.trim(),
-        phone: phone.trim() || null,
-        location_id: locationId || null,
-        role,
-        job_access: jobAccess,
-        purchase_access: purchaseAccess,
-        cycle_count_access: cycleCountAccess,
-        active: true,
+          phone: phone.trim(),
+          locationId,
+          role,
+          jobAccess,
+          purchaseAccess,
+          cycleCountAccess,
+          // ASSUMPTION: you'll need to pass the current admin's org_id
+          // here somehow — e.g. from a session/auth context — so the
+          // new user gets created under the right organization.
+        }),
       });
 
-      if (profileError) throw profileError;
+      const result = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(result.error || "Failed to create user.");
+      }
 
       onSaved?.();
     } catch (e) {

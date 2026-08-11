@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { Users, Search, Plus, Shield, Mail, Phone } from "lucide-react";
-import { createClient } from "@/lib/supabaseClient"; // ASSUMPTION: adjust to your actual client path
+import { supabase } from "@/lib/supabase";
 import AddUserModal from "./AddUserModal";
 
 export default function TeamPage() {
@@ -18,7 +18,6 @@ export default function TeamPage() {
 
   async function loadUsers() {
     setLoading(true);
-    const supabase = createClient();
 
     // ASSUMPTION: profiles table has: id, username, email, phone, role,
     // active (bool), org_id. Job counts come from a `jobs` table with
