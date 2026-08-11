@@ -5,7 +5,7 @@ import {
   ShoppingCart, Plus, Pencil, Trash2, Check, ArrowLeft, ArrowRight,
   Briefcase, Building2, Package, ClipboardCheck, X, Search, UserPlus,
   Upload, MapPin, Calendar, Mail, ChevronDown, ChevronRight, Download,
-  MoreVertical, Warehouse,
+  MoreVertical, Warehouse, AlertTriangle,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
@@ -239,6 +239,8 @@ function PurchaseOrdersPageInner() {
       notes: "",
       poDate: todayISO(),
       deliveryDate: "",
+      pendingFiles: [],
+      existingAttachments: [],
     });
   };
 
@@ -246,8 +248,13 @@ function PurchaseOrdersPageInner() {
   // Starts on the last step (Review) since everything is already
   // chosen -- the person can still click Back through earlier steps
   // to change vendor/products/delivery if needed.
-  const openEditWizard = (p) => {
+  const openEditWizard = async (p) => {
     setError("");
+    const { data: existingAttachments } = await supabase
+      .from("po_attachments")
+      .select("*")
+      .eq("po_id", p.id)
+      .order("created_at", { ascending: false });
     setWizard({
       mode: "edit",
       editingId: p.id,
@@ -262,6 +269,8 @@ function PurchaseOrdersPageInner() {
       notes: p.notes || "",
       poDate: p.po_date || todayISO(),
       deliveryDate: p.delivery_date || "",
+      pendingFiles: [],
+      existingAttachments: existingAttachments || [],
     });
     setOpenActionsId(null);
   };
@@ -274,6 +283,27 @@ function PurchaseOrdersPageInner() {
     const target = pos.find((p) => p.id === editId);
     if (target) openEditWizard(target);
   }, [searchParams, pos]);
+
+  const po_no_for_activity = (id) => pos.find((p) => p.id === id)?.po_no || id;
+
+  // Uploads any files staged in the wizard (wizard.pendingFiles) to the
+  // given PO id, once that PO actually exists in the database. Used by
+  // both the create and edit save paths below.
+  const uploadPendingFiles = async (poId, files) => {
+    for (const file of files) {
+      const path = `${orgId}/${poId}/${Date.now()}-${file.name}`;
+      const { error: upErr } = await supabase.storage.from("po-attachments").upload(path, file);
+      if (upErr) { console.error("Attachment upload failed:", upErr.message); continue; }
+      await supabase.from("po_attachments").insert({
+        org_id: orgId,
+        po_id: poId,
+        file_path: path,
+        file_name: file.name,
+        file_size: file.size,
+        uploaded_by: user?.id || null,
+      });
+    }
+  };
 
   const saveWizardPO = async (status) => {
     if (!wizard) return;
@@ -340,6 +370,7 @@ function PurchaseOrdersPageInner() {
         if (liErr) throw liErr;
 
         await logActivity(`Updated PO ${po_no_for_activity(wizard.editingId)}`);
+        if (wizard.pendingFiles?.length) await uploadPendingFiles(wizard.editingId, wizard.pendingFiles);
         setWizard(null);
         router.push(`/purchase-orders/${wizard.editingId}`);
         return;
@@ -381,6 +412,7 @@ function PurchaseOrdersPageInner() {
       }
 
       await logActivity(`Created PO ${poNo} — ${vendorLabel(vendor)} (${status})`);
+      if (wizard.pendingFiles?.length) await uploadPendingFiles(poRow.id, wizard.pendingFiles);
 
       /*
        * NOTE: "Save & Send" only sets status to "Ordered" here.
@@ -397,8 +429,6 @@ function PurchaseOrdersPageInner() {
       setSaving(false);
     }
   };
-
-  const po_no_for_activity = (id) => pos.find((p) => p.id === id)?.po_no || id;
 
   /*
    * =========================================================
@@ -689,7 +719,7 @@ function PurchaseOrdersPageInner() {
       )}
 
       {confirmDelete && (
-        <ConfirmModal title="Delete PO" message={`Delete "${confirmDelete.po_no}"? This can't be undone.`} onCancel={() => setConfirmDelete(null)} onConfirm={remove} />
+        <DeletePOModal po={confirmDelete} onCancel={() => setConfirmDelete(null)} onConfirm={remove} />
       )}
     </Nav>
   );
@@ -1346,10 +1376,50 @@ function POWizard({
 
           <div className="mt-2">
             <div className="text-xs f-mono uppercase text-slate-500 mb-1">Attachments</div>
-            <div className="border border-dashed border-slate-700 rounded p-4 text-center text-xs text-slate-500">
+
+            {wizard.existingAttachments?.length > 0 && (
+              <div className="space-y-1.5 mb-2">
+                {wizard.existingAttachments.map((att) => (
+                  <div key={att.id} className="flex items-center justify-between border border-slate-800 rounded px-3 py-2 text-sm">
+                    <span className="text-slate-300 truncate">{att.file_name}</span>
+                    <span className="text-[11px] text-slate-600">Already uploaded</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {wizard.pendingFiles?.length > 0 && (
+              <div className="space-y-1.5 mb-2">
+                {wizard.pendingFiles.map((file, i) => (
+                  <div key={i} className="flex items-center justify-between border border-orange-500/30 bg-orange-500/5 rounded px-3 py-2 text-sm">
+                    <span className="text-slate-200 truncate">{file.name}</span>
+                    <button
+                      onClick={() => update({ pendingFiles: wizard.pendingFiles.filter((_, idx) => idx !== i) })}
+                      className="text-red-400 hover:text-red-300 shrink-0 ml-2"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <label className="block border border-dashed border-slate-700 rounded p-4 text-center text-xs text-slate-500 cursor-pointer hover:border-slate-600">
+              <input
+                type="file"
+                multiple
+                className="hidden"
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
+                onChange={(e) => {
+                  const newFiles = Array.from(e.target.files || []);
+                  update({ pendingFiles: [...(wizard.pendingFiles || []), ...newFiles] });
+                  e.target.value = "";
+                }}
+              />
               <Upload size={16} className="mx-auto mb-1 text-slate-600" />
-              Upload files from the PO's detail page after saving
-            </div>
+              Click to select files — uploaded when you save
+              <div className="text-[10px] text-slate-600 mt-1">PDF, DOC, DOCX, XLS, XLSX, JPG, PNG (Max 10MB each)</div>
+            </label>
           </div>
 
           <div className="flex justify-between mt-4">
@@ -1386,5 +1456,35 @@ function POWizard({
         </div>
       )}
     </ModalShell>
+  );
+}
+
+/*
+ * =============================================================
+ * DELETE PO CONFIRMATION
+ * =============================================================
+ *
+ * Custom dialog (not the generic ConfirmModal) to match the exact
+ * reference wording/layout: centered icon, plain-language question,
+ * a bold callout of which PO, and a separate warning line.
+ */
+
+function DeletePOModal({ po, onCancel, onConfirm }) {
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-lg max-w-sm w-full p-6 text-center">
+        <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mx-auto mb-4">
+          <Trash2 size={20} className="text-red-400" />
+        </div>
+        <div className="text-base font-medium text-slate-100 mb-2">Delete Purchase Order</div>
+        <div className="text-sm text-slate-400 mb-1">Are you sure you want to delete this purchase order?</div>
+        <div className="text-sm font-semibold text-slate-100 mb-2">Purchase # {po.po_no}</div>
+        <div className="text-xs text-red-400 mb-5">This action cannot be undone.</div>
+        <div className="flex justify-center gap-2">
+          <button onClick={onCancel} className="px-4 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
+          <button onClick={onConfirm} className="px-4 py-2 text-sm rounded bg-red-600 text-white hover:bg-red-500">Delete</button>
+        </div>
+      </div>
+    </div>
   );
 }
