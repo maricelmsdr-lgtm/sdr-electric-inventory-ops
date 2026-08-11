@@ -38,6 +38,8 @@ export default function PODetailPage() {
   const [error, setError] = useState("");
   const [statusSaving, setStatusSaving] = useState(false);
   const [receiveModalOpen, setReceiveModalOpen] = useState(false);
+  const [returnModalOpen, setReturnModalOpen] = useState(false);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [cloning, setCloning] = useState(false);
   const [tab, setTab] = useState("lines");
@@ -182,6 +184,73 @@ export default function PODetailPage() {
     setTimeout(() => setComingSoon(null), 2500);
   };
 
+  /*
+   * =========================================================
+   * PDF EXPORT — browser print-to-PDF, no external library or
+   * service needed. Opens a plain, print-styled window with just
+   * the PO content; the browser's own "Save as PDF" print
+   * destination produces the actual file.
+   * =========================================================
+   */
+
+  const exportPdf = () => {
+    if (!po) return;
+    const lineRows = (po.po_line_items || [])
+      .map((li) => `
+        <tr>
+          <td>${li.parts?.part_no || "—"}</td>
+          <td>${li.parts?.sku || "—"}</td>
+          <td style="text-align:right">${li.qty}</td>
+          <td style="text-align:right">${money(li.unit_cost)}</td>
+          <td style="text-align:right">${money(Number(li.qty) * Number(li.unit_cost))}</td>
+        </tr>`)
+      .join("");
+    const total = (po.po_line_items || []).reduce((s, li) => s + Number(li.qty) * Number(li.unit_cost), 0);
+
+    const html = `
+      <html>
+        <head>
+          <title>${po.po_no}</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 32px; color: #111; }
+            h1 { font-size: 20px; margin-bottom: 4px; }
+            .meta { color: #555; font-size: 13px; margin-bottom: 24px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+            th, td { border-bottom: 1px solid #ddd; padding: 8px; font-size: 13px; text-align: left; }
+            th { color: #666; text-transform: uppercase; font-size: 11px; }
+            .total-row td { font-weight: bold; border-top: 2px solid #333; }
+          </style>
+        </head>
+        <body>
+          <h1>Purchase Order ${po.po_no}</h1>
+          <div class="meta">
+            Vendor: ${po.vendor}<br/>
+            Delivered To: ${po.locations?.name || "—"}<br/>
+            Date: ${fmtDate(po.po_date)}
+          </div>
+          <table>
+            <thead>
+              <tr><th>Product</th><th>Code/SKU</th><th style="text-align:right">Qty</th><th style="text-align:right">Price</th><th style="text-align:right">Total</th></tr>
+            </thead>
+            <tbody>${lineRows}</tbody>
+            <tfoot>
+              <tr class="total-row"><td colspan="4">Total</td><td style="text-align:right">${money(total)}</td></tr>
+            </tfoot>
+          </table>
+        </body>
+      </html>
+    `;
+
+    const win = window.open("", "_blank");
+    win.document.write(html);
+    win.document.close();
+    win.focus();
+    // Small delay so the new window finishes rendering before the
+    // print dialog opens -- calling print() immediately on some
+    // browsers fires before layout is ready and prints a blank page.
+    setTimeout(() => win.print(), 300);
+  };
+
   if (loading || !po) {
     return (
       <Nav title="Purchase Order">
@@ -197,6 +266,7 @@ export default function PODetailPage() {
     (li) => Number(li.qty_received || 0) < Number(li.qty)
   );
   const receivedLines = (po.po_line_items || []).filter((li) => Number(li.qty_received || 0) > 0);
+  const returnedLines = (po.po_line_items || []).filter((li) => Number(li.qty_returned || 0) > 0);
 
   return (
     <Nav title="Purchase Order">
@@ -234,19 +304,19 @@ export default function PODetailPage() {
               </button>
             )}
             <button
-              onClick={() => flagComingSoon("Returns")}
+              onClick={() => setReturnModalOpen(true)}
               className="px-3 py-2 text-sm rounded border border-slate-700 text-slate-400 hover:bg-slate-800 flex items-center gap-1.5"
             >
               <RotateCcw size={14} /> Return
             </button>
             <button
-              onClick={() => flagComingSoon("Email")}
+              onClick={() => setEmailModalOpen(true)}
               className="px-3 py-2 text-sm rounded border border-slate-700 text-slate-400 hover:bg-slate-800 flex items-center gap-1.5"
             >
               <Mail size={14} /> Email
             </button>
             <button
-              onClick={() => flagComingSoon("PDF export")}
+              onClick={exportPdf}
               className="px-3 py-2 text-sm rounded border border-slate-700 text-slate-400 hover:bg-slate-800 flex items-center gap-1.5"
             >
               <FileDown size={14} /> PDF
@@ -416,8 +486,12 @@ export default function PODetailPage() {
                         <Td className="text-right f-mono">
                           {receivable > 0 ? <span className="text-amber-400">{receivable}</span> : <span className="text-slate-600">0</span>}
                         </Td>
-                        {/* Returns aren't built yet (see Returns tab) -- always 0 for now */}
-                        <Td className="text-right f-mono text-slate-600">0</Td>
+                        {/* Real returned qty now (was a static 0 placeholder) */}
+                        <Td className="text-right f-mono">
+                          {Number(li.qty_returned || 0) > 0
+                            ? <span className="text-red-400">{li.qty_returned}</span>
+                            : <span className="text-slate-600">0</span>}
+                        </Td>
                         <Td>
                           <div className="flex gap-1.5 justify-end">
                             <IconBtn onClick={() => flagComingSoon("Editing individual line items")}><Pencil size={12} /></IconBtn>
@@ -471,11 +545,28 @@ export default function PODetailPage() {
         {/* ================= RETURNS TAB ================= */}
         {tab === "returns" && (
           <Panel title="Returns" icon={RotateCcw}>
-            <div className="text-sm text-slate-500 p-2">
-              Not built yet — returning received stock back to a vendor needs its own
-              flow (which items, how many, restocking vs. return-to-vendor, inventory
-              impact). Future session.
-            </div>
+            {returnedLines.length === 0 ? (
+              <div className="text-sm text-slate-500 p-2">Nothing returned on this PO yet.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[500px]">
+                  <thead><tr><Th>Product</Th><Th>Code/SKU</Th><Th className="text-right">Returned Qty</Th></tr></thead>
+                  <tbody>
+                    {returnedLines.map((li) => (
+                      <tr key={li.id} className="border-t border-slate-800/70">
+                        <Td>{li.parts?.part_no || "—"}</Td>
+                        <Td className="f-mono text-xs text-slate-400">{li.parts?.sku || "—"}</Td>
+                        <Td className="text-right f-mono text-red-400">{li.qty_returned}</Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="text-[11px] text-slate-600 mt-2 px-1">
+                  Shows current returned totals per line — a timestamped return history
+                  (who returned what, when, and why) would need its own table. Future session.
+                </div>
+              </div>
+            )}
           </Panel>
         )}
 
@@ -503,6 +594,18 @@ export default function PODetailPage() {
           onClose={() => setReceiveModalOpen(false)}
           onReceived={() => { setReceiveModalOpen(false); fetchPO(); }}
         />
+      )}
+
+      {returnModalOpen && (
+        <ReturnItemsModal
+          po={po}
+          onClose={() => setReturnModalOpen(false)}
+          onReturned={() => { setReturnModalOpen(false); fetchPO(); }}
+        />
+      )}
+
+      {emailModalOpen && (
+        <SendEmailModal po={po} total={total} onClose={() => setEmailModalOpen(false)} />
       )}
 
       {confirmDelete && (
@@ -652,6 +755,202 @@ function ReceiveProductsModal({ po, onClose, onReceived }) {
         <button onClick={onClose} className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
         <PrimaryBtn onClick={submit} className={saving ? "opacity-60 pointer-events-none" : ""}>
           <Check size={15} /> {saving ? "Saving..." : "Save"}
+        </PrimaryBtn>
+      </div>
+    </ModalShell>
+  );
+}
+
+/*
+ * =============================================================
+ * RETURN ITEMS MODAL
+ * =============================================================
+ *
+ * Mirrors ReceiveProductsModal, but the eligible pool is "received
+ * and not yet returned" (qty_received - qty_returned) instead of
+ * "ordered and not yet received". Calls return_po_line_items,
+ * which removes stock from inventory (the reverse of receiving).
+ */
+
+function ReturnItemsModal({ po, onClose, onReturned }) {
+  const returnableLines = (po.po_line_items || [])
+    .map((li) => ({
+      ...li,
+      returnable: Math.max(Number(li.qty_received || 0) - Number(li.qty_returned || 0), 0),
+    }))
+    .filter((li) => li.returnable > 0);
+
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState(new Set());
+  const [amounts, setAmounts] = useState(
+    Object.fromEntries(returnableLines.map((li) => [li.id, 0]))
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const visibleLines = returnableLines.filter((li) =>
+    `${li.parts?.part_no || ""} ${li.parts?.sku || ""}`.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggleSelected = (id) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelected(next);
+  };
+
+  const updateAmount = (lineId, val, max) => {
+    const n = Math.max(0, Math.min(Number(val) || 0, max));
+    setAmounts({ ...amounts, [lineId]: n });
+  };
+
+  const submit = async () => {
+    const returns = returnableLines
+      .filter((li) => selected.has(li.id))
+      .map((li) => ({ line_item_id: li.id, qty: Number(amounts[li.id] || 0) }))
+      .filter((r) => r.qty > 0);
+
+    if (returns.length === 0) {
+      setError("Select at least one item and enter a quantity to return.");
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    try {
+      const { error: rpcErr } = await supabase.rpc("return_po_line_items", {
+        p_po_id: po.id,
+        p_returns: returns,
+      });
+      if (rpcErr) throw rpcErr;
+      onReturned();
+    } catch (e) {
+      setError(e.message || "Could not process the return.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ModalShell title={`Return Items — ${po.po_no}`} icon={RotateCcw} onClose={onClose} wide>
+      <input
+        type="text"
+        placeholder="Search by product name, code, or SKU..."
+        className={`${inputCls} mb-3`}
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
+      {error && <div className="text-sm text-red-400 mb-3 border border-red-900/50 bg-red-950/20 rounded px-3 py-2">{error}</div>}
+
+      {visibleLines.length === 0 ? (
+        <div className="text-sm text-slate-500 p-4 text-center border border-slate-800 rounded">No items available to return.</div>
+      ) : (
+        <div className="border border-slate-800 rounded">
+          <div className="grid grid-cols-[auto_2fr_0.8fr_1fr] gap-2 px-3 py-2 border-b border-slate-800 text-[11px] f-mono uppercase text-slate-500 items-center">
+            <span></span>
+            <span>Product</span>
+            <span className="text-right">Available to Return</span>
+            <span className="text-right">Qty to Return</span>
+          </div>
+          {visibleLines.map((li) => (
+            <div key={li.id} className="grid grid-cols-[auto_2fr_0.8fr_1fr] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0">
+              <input type="checkbox" checked={selected.has(li.id)} onChange={() => toggleSelected(li.id)} />
+              <div>
+                <div className="text-sm text-slate-100">{li.parts?.part_no || "—"}</div>
+                <div className="text-xs f-mono text-slate-500">{li.parts?.sku}</div>
+              </div>
+              <div className="text-right f-mono text-sm text-amber-400">{li.returnable}</div>
+              <input
+                type="number"
+                min="0"
+                max={li.returnable}
+                className={inputCls}
+                disabled={!selected.has(li.id)}
+                value={amounts[li.id]}
+                onChange={(e) => updateAmount(li.id, e.target.value, li.returnable)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2 mt-4">
+        <button onClick={onClose} className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
+        <PrimaryBtn onClick={submit} className={saving ? "opacity-60 pointer-events-none" : ""}>
+          <Check size={15} /> {saving ? "Saving..." : "Save Return"}
+        </PrimaryBtn>
+      </div>
+    </ModalShell>
+  );
+}
+
+/*
+ * =============================================================
+ * SEND EMAIL MODAL
+ * =============================================================
+ *
+ * No email-sending service (Resend/SendGrid/etc.) is configured,
+ * so this opens the person's own default email client via a
+ * mailto: link, pre-filled with subject and body -- free, no API
+ * keys, no backend. Limitation: mailto can't attach a file
+ * (browser/OS restriction), so the PDF isn't auto-attached -- the
+ * modal tells the person to use the PDF button first and attach
+ * it manually. If you set up a real email service later, this
+ * modal is where that API call would go instead.
+ */
+
+function SendEmailModal({ po, total, onClose }) {
+  const [to, setTo] = useState("");
+  const [subject, setSubject] = useState(`Purchase Order #${po.po_no}`);
+  const [message, setMessage] = useState(
+    `Dear ${po.vendor},\n\nPlease find the purchase order details below for your reference.\n\n` +
+    `Order Details:\n- Purchase Number: ${po.po_no}\n- Purchase Date: ${po.po_date}\n- Total: ${money(total)}\n\n` +
+    `Thank you for your business.\n\nBest regards,`
+  );
+
+  const send = () => {
+    if (!to.trim()) return;
+    const body = encodeURIComponent(message);
+    const subj = encodeURIComponent(subject);
+    window.location.href = `mailto:${encodeURIComponent(to.trim())}?subject=${subj}&body=${body}`;
+    onClose();
+  };
+
+  return (
+    <ModalShell title="Send Email" icon={Mail} onClose={onClose} wide>
+      <div className="text-xs text-amber-400 mb-3 border border-amber-900/40 bg-amber-950/20 rounded px-3 py-2">
+        This opens your own email app with the message pre-filled — no automatic sending
+        or attachment yet (that needs an email service set up). Use the PDF button first
+        if you want to attach the order as a file.
+      </div>
+
+      <div className="mb-3">
+        <label className="text-xs text-slate-500 block mb-1">To</label>
+        <input
+          type="email"
+          className={inputCls}
+          placeholder="Enter recipient email address"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+        />
+      </div>
+      <div className="mb-3">
+        <label className="text-xs text-slate-500 block mb-1">Subject</label>
+        <input className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)} />
+      </div>
+      <div className="mb-3">
+        <label className="text-xs text-slate-500 block mb-1">Message</label>
+        <textarea
+          className={`${inputCls} min-h-[160px]`}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+        />
+      </div>
+
+      <div className="flex justify-end gap-2 mt-4">
+        <button onClick={onClose} className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
+        <PrimaryBtn onClick={send} disabled={!to.trim()}>
+          <Mail size={15} /> Open in Email App
         </PrimaryBtn>
       </div>
     </ModalShell>
