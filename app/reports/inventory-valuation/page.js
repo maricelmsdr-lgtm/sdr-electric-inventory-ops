@@ -1,0 +1,2051 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import {
+  Download,
+  FileText,
+  Search,
+  X,
+  BarChart3,
+  Table2,
+  DollarSign,
+  Package,
+  TrendingUp,
+} from "lucide-react";
+
+import { supabase } from "@/lib/supabase";
+import Nav from "@/components/Nav";
+
+const CATEGORIES = ["Electrical", "Plumbing", "HVAC", "General"];
+
+function money(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0));
+}
+
+function number(value) {
+  return new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(Number(value || 0));
+}
+
+function percent(value) {
+  return `${Number(value || 0).toFixed(1)}%`;
+}
+
+function escapeCsv(value) {
+  const text = String(value ?? "");
+
+  if (
+    text.includes(",") ||
+    text.includes('"') ||
+    text.includes("\n")
+  ) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  return text;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function downloadFile(content, filename, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(url);
+}
+
+export default function InventoryValuationPage() {
+  const [orgId, setOrgId] = useState(null);
+
+  const [parts, setParts] = useState([]);
+  const [locations, setLocations] = useState([]);
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const [productFilter, setProductFilter] = useState("");
+  const [locationFilter, setLocationFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [search, setSearch] = useState("");
+
+  const [sortField, setSortField] = useState("value");
+  const [sortDirection, setSortDirection] = useState("desc");
+
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  const [viewMode, setViewMode] = useState("report");
+
+  /*
+   * =========================================================
+   * AUTH / ORGANIZATION
+   * =========================================================
+   */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadOrganization() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const {
+          data: { user },
+          error: authError,
+        } = await supabase.auth.getUser();
+
+        if (authError) {
+          throw authError;
+        }
+
+        if (!user) {
+          window.location.href = "/login";
+          return;
+        }
+
+        const {
+          data: profile,
+          error: profileError,
+        } = await supabase
+          .from("profiles")
+          .select("org_id")
+          .eq("id", user.id)
+          .single();
+
+        if (profileError) {
+          throw profileError;
+        }
+
+        if (!profile?.org_id) {
+          throw new Error(
+            "No organization is assigned to this user."
+          );
+        }
+
+        if (!cancelled) {
+          setOrgId(profile.org_id);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err?.message ||
+              "Unable to load organization."
+          );
+          setLoading(false);
+        }
+      }
+    }
+
+    loadOrganization();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /*
+   * =========================================================
+   * LOAD INVENTORY
+   * =========================================================
+   */
+
+  useEffect(() => {
+    if (!orgId) return;
+
+    let cancelled = false;
+
+    async function loadInventory() {
+      try {
+        setLoading(true);
+        setError("");
+
+        const partsResult = await supabase
+          .from("parts")
+          .select("*")
+          .eq("org_id", orgId);
+
+        if (partsResult.error) {
+          throw partsResult.error;
+        }
+
+        const locationsResult = await supabase
+          .from("locations")
+          .select("*")
+          .eq("org_id", orgId);
+
+        const loadedParts = partsResult.data || [];
+
+        const loadedLocations =
+          locationsResult.error ||
+          !locationsResult.data
+            ? []
+            : locationsResult.data;
+
+        if (!cancelled) {
+          setParts(loadedParts);
+          setLocations(loadedLocations);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err?.message ||
+              "Unable to load inventory."
+          );
+          setParts([]);
+          setLocations([]);
+          setLoading(false);
+        }
+      }
+    }
+
+    loadInventory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [orgId]);
+
+  /*
+   * =========================================================
+   * LOCATION MAP
+   * =========================================================
+   */
+
+  const locationMap = useMemo(() => {
+    const map = new Map();
+
+    for (const location of locations) {
+      if (!location.id) continue;
+
+      map.set(
+        location.id,
+        location.name ||
+          location.location_name ||
+          location.title ||
+          location.code ||
+          location.id
+      );
+    }
+
+    return map;
+  }, [locations]);
+
+  function getLocationId(part) {
+    return (
+      part.location_id ||
+      part.locationId ||
+      part.warehouse_id ||
+      part.warehouseId ||
+      null
+    );
+  }
+
+  function getLocationName(part) {
+    const locationId = getLocationId(part);
+
+    if (
+      locationId &&
+      locationMap.has(locationId)
+    ) {
+      return locationMap.get(locationId);
+    }
+
+    return (
+      part.location_name ||
+      part.location ||
+      part.warehouse_name ||
+      part.warehouse ||
+      "All Locations"
+    );
+  }
+
+  /*
+   * =========================================================
+   * NORMALIZE INVENTORY
+   * =========================================================
+   */
+
+  const inventoryRows = useMemo(() => {
+    return parts.map((part) => {
+      const qty = Number(
+        part.qty ??
+          part.quantity ??
+          part.on_hand ??
+          part.on_hand_qty ??
+          0
+      );
+
+      const unitCost = Number(
+        part.unit_cost ??
+          part.cost ??
+          part.average_cost ??
+          part.avg_cost ??
+          0
+      );
+
+      const productName =
+        part.name ||
+        part.part_name ||
+        part.description ||
+        part.product_name ||
+        part.part_no ||
+        "Unnamed Product";
+
+      const productCode =
+        part.sku ||
+        part.part_no ||
+        part.product_code ||
+        part.code ||
+        "";
+
+      const category =
+        part.category ||
+        part.trade ||
+        part.type ||
+        "General";
+
+      const uom =
+        part.uom ||
+        part.unit_of_measure ||
+        part.unit ||
+        "Nos";
+
+      const locationName =
+        getLocationName(part);
+
+      const totalValue = qty * unitCost;
+
+      return {
+        id: part.id,
+        productName,
+        productCode,
+        category,
+        locationName,
+        uom,
+        qty,
+        unitCost,
+        totalValue,
+        raw: part,
+      };
+    });
+  }, [parts, locationMap]);
+
+  /*
+   * =========================================================
+   * FILTER OPTIONS
+   * =========================================================
+   */
+
+  const productOptions = useMemo(() => {
+    const map = new Map();
+
+    for (const row of inventoryRows) {
+      const key =
+        row.productCode ||
+        row.productName;
+
+      if (!key) continue;
+
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          name: row.productName,
+          code: row.productCode,
+        });
+      }
+    }
+
+    return Array.from(map.values()).sort(
+      (a, b) =>
+        a.name.localeCompare(b.name)
+    );
+  }, [inventoryRows]);
+
+  const locationOptions = useMemo(() => {
+    const names = new Set();
+
+    for (const row of inventoryRows) {
+      if (row.locationName) {
+        names.add(row.locationName);
+      }
+    }
+
+    return Array.from(names).sort(
+      (a, b) =>
+        a.localeCompare(b)
+    );
+  }, [inventoryRows]);
+
+  /*
+   * =========================================================
+   * FILTERED DATA
+   * =========================================================
+   */
+
+  const filteredRows = useMemo(() => {
+    const query =
+      search.trim().toLowerCase();
+
+    return inventoryRows.filter((row) => {
+      if (
+        productFilter &&
+        row.productCode !== productFilter &&
+        row.productName !== productFilter
+      ) {
+        return false;
+      }
+
+      if (
+        locationFilter &&
+        row.locationName !== locationFilter
+      ) {
+        return false;
+      }
+
+      if (
+        categoryFilter &&
+        row.category !== categoryFilter
+      ) {
+        return false;
+      }
+
+      if (query) {
+        const searchable = [
+          row.productName,
+          row.productCode,
+          row.category,
+          row.locationName,
+          row.uom,
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        if (!searchable.includes(query)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [
+    inventoryRows,
+    productFilter,
+    locationFilter,
+    categoryFilter,
+    search,
+  ]);
+
+  /*
+   * =========================================================
+   * SUMMARY
+   * =========================================================
+   */
+
+  const totalValue = useMemo(
+    () =>
+      filteredRows.reduce(
+        (sum, row) =>
+          sum + row.totalValue,
+        0
+      ),
+    [filteredRows]
+  );
+
+  const totalQuantity = useMemo(
+    () =>
+      filteredRows.reduce(
+        (sum, row) => sum + row.qty,
+        0
+      ),
+    [filteredRows]
+  );
+
+  const uniqueProducts = useMemo(() => {
+    const products = new Set();
+
+    for (const row of filteredRows) {
+      products.add(
+        row.productCode ||
+          row.productName
+      );
+    }
+
+    return products.size;
+  }, [filteredRows]);
+
+  const averageUnitCost =
+    totalQuantity > 0
+      ? totalValue / totalQuantity
+      : 0;
+
+  /*
+   * =========================================================
+   * CATEGORY VALUATION
+   * =========================================================
+   */
+
+  const categoryData = useMemo(() => {
+    const map = new Map();
+
+    for (const row of filteredRows) {
+      if (!map.has(row.category)) {
+        map.set(row.category, {
+          category: row.category,
+          qty: 0,
+          value: 0,
+        });
+      }
+
+      const entry = map.get(
+        row.category
+      );
+
+      entry.qty += row.qty;
+      entry.value += row.totalValue;
+    }
+
+    return Array.from(map.values())
+      .sort((a, b) => b.value - a.value)
+      .map((row) => ({
+        ...row,
+        percentage:
+          totalValue > 0
+            ? (row.value / totalValue) * 100
+            : 0,
+      }));
+  }, [filteredRows, totalValue]);
+
+  /*
+   * =========================================================
+   * PRODUCT VALUATION
+   * =========================================================
+   */
+
+  const productValuation = useMemo(() => {
+    const map = new Map();
+
+    for (const row of filteredRows) {
+      const key =
+        row.productCode ||
+        row.productName;
+
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          productName: row.productName,
+          productCode: row.productCode,
+          category: row.category,
+          qty: 0,
+          value: 0,
+          unitCost: row.unitCost,
+        });
+      }
+
+      const entry = map.get(key);
+
+      entry.qty += row.qty;
+      entry.value += row.totalValue;
+
+      if (
+        row.unitCost > 0 &&
+        entry.unitCost === 0
+      ) {
+        entry.unitCost = row.unitCost;
+      }
+    }
+
+    return Array.from(
+      map.values()
+    ).map((row) => ({
+      ...row,
+      percentage:
+        totalValue > 0
+          ? (row.value / totalValue) * 100
+          : 0,
+    }));
+  }, [filteredRows, totalValue]);
+
+  /*
+   * =========================================================
+   * SORT
+   * =========================================================
+   */
+
+  const sortedRows = useMemo(() => {
+    const rows = [
+      ...productValuation,
+    ];
+
+    rows.sort((a, b) => {
+      let av;
+      let bv;
+
+      switch (sortField) {
+        case "code":
+          av = a.productCode;
+          bv = b.productCode;
+          break;
+
+        case "category":
+          av = a.category;
+          bv = b.category;
+          break;
+
+        case "qty":
+          av = a.qty;
+          bv = b.qty;
+          break;
+
+        case "unitCost":
+          av = a.unitCost;
+          bv = b.unitCost;
+          break;
+
+        case "percentage":
+          av = a.percentage;
+          bv = b.percentage;
+          break;
+
+        case "value":
+          av = a.value;
+          bv = b.value;
+          break;
+
+        case "name":
+        default:
+          av = a.productName;
+          bv = b.productName;
+          break;
+      }
+
+      if (
+        typeof av === "number" &&
+        typeof bv === "number"
+      ) {
+        return sortDirection === "asc"
+          ? av - bv
+          : bv - av;
+      }
+
+      return sortDirection === "asc"
+        ? String(av ?? "").localeCompare(
+            String(bv ?? "")
+          )
+        : String(bv ?? "").localeCompare(
+            String(av ?? "")
+          );
+    });
+
+    return rows;
+  }, [
+    productValuation,
+    sortField,
+    sortDirection,
+  ]);
+
+  /*
+   * =========================================================
+   * GRAPH DATA
+   * =========================================================
+   */
+
+  const graphRows = useMemo(() => {
+    return [...productValuation]
+      .sort(
+        (a, b) => b.value - a.value
+      )
+      .slice(0, 25);
+  }, [productValuation]);
+
+  const graphMaxValue = Math.max(
+    ...graphRows.map(
+      (row) => row.value
+    ),
+    1
+  );
+
+  const categoryMaxValue = Math.max(
+    ...categoryData.map(
+      (row) => row.value
+    ),
+    1
+  );
+
+  /*
+   * =========================================================
+   * PAGINATION
+   * =========================================================
+   */
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(
+      sortedRows.length / pageSize
+    )
+  );
+
+  const safePage = Math.min(
+    page,
+    totalPages
+  );
+
+  const pageRows = useMemo(() => {
+    const start =
+      (safePage - 1) * pageSize;
+
+    return sortedRows.slice(
+      start,
+      start + pageSize
+    );
+  }, [
+    sortedRows,
+    safePage,
+    pageSize,
+  ]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [
+    productFilter,
+    locationFilter,
+    categoryFilter,
+    search,
+    pageSize,
+  ]);
+
+  /*
+   * =========================================================
+   * SORT HANDLER
+   * =========================================================
+   */
+
+  function handleSort(field) {
+    if (sortField === field) {
+      setSortDirection(
+        (current) =>
+          current === "asc"
+            ? "desc"
+            : "asc"
+      );
+
+      return;
+    }
+
+    setSortField(field);
+    setSortDirection("asc");
+  }
+
+  function sortIndicator(field) {
+    if (sortField !== field) {
+      return "↕";
+    }
+
+    return sortDirection === "asc"
+      ? "↑"
+      : "↓";
+  }
+
+  /*
+   * =========================================================
+   * EXPORT CSV
+   * =========================================================
+   */
+
+  function exportExcel() {
+    const rows = [
+      [
+        "Product Name",
+        "Product Code",
+        "Category",
+        "Quantity",
+        "Unit Cost",
+        "Inventory Value",
+        "% of Total",
+      ],
+      ...sortedRows.map((row) => [
+        row.productName,
+        row.productCode,
+        row.category,
+        row.qty,
+        row.unitCost,
+        row.value,
+        row.percentage / 100,
+      ]),
+    ];
+
+    const csv = rows
+      .map((row) =>
+        row.map(escapeCsv).join(",")
+      )
+      .join("\n");
+
+    downloadFile(
+      csv,
+      `inventory-valuation-${new Date()
+        .toISOString()
+        .slice(0, 10)}.csv`,
+      "text/csv;charset=utf-8;"
+    );
+  }
+
+  /*
+   * =========================================================
+   * EXPORT PDF
+   * =========================================================
+   */
+
+  function exportPdf() {
+    const printWindow =
+      window.open(
+        "",
+        "_blank",
+        "width=1200,height=800"
+      );
+
+    if (!printWindow) {
+      alert(
+        "Please allow popups to export the report."
+      );
+      return;
+    }
+
+    const categoryHtml =
+      categoryData
+        .map(
+          (row) => `
+            <tr>
+              <td>${escapeHtml(
+                row.category
+              )}</td>
+              <td class="number">${number(
+                row.qty
+              )}</td>
+              <td class="number">${money(
+                row.value
+              )}</td>
+              <td class="number">${percent(
+                row.percentage
+              )}</td>
+            </tr>
+          `
+        )
+        .join("");
+
+    const productHtml =
+      sortedRows
+        .map(
+          (row) => `
+            <tr>
+              <td>${escapeHtml(
+                row.productName
+              )}</td>
+              <td>${escapeHtml(
+                row.productCode
+              )}</td>
+              <td>${escapeHtml(
+                row.category
+              )}</td>
+              <td class="number">${number(
+                row.qty
+              )}</td>
+              <td class="number">${money(
+                row.unitCost
+              )}</td>
+              <td class="number">${money(
+                row.value
+              )}</td>
+              <td class="number">${percent(
+                row.percentage
+              )}</td>
+            </tr>
+          `
+        )
+        .join("");
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html>
+        <head>
+          <title>Inventory Valuation Report</title>
+
+          <style>
+            * {
+              box-sizing: border-box;
+            }
+
+            body {
+              font-family: Arial, sans-serif;
+              padding: 32px;
+              color: #111827;
+            }
+
+            h1 {
+              margin: 0 0 8px;
+              font-size: 24px;
+            }
+
+            h2 {
+              margin: 28px 0 12px;
+              font-size: 16px;
+            }
+
+            .meta {
+              color: #6b7280;
+              font-size: 12px;
+              margin-bottom: 24px;
+            }
+
+            .summary {
+              display: flex;
+              gap: 16px;
+              margin-bottom: 24px;
+            }
+
+            .card {
+              flex: 1;
+              border: 1px solid #e5e7eb;
+              border-radius: 8px;
+              padding: 14px;
+            }
+
+            .label {
+              color: #6b7280;
+              font-size: 11px;
+              margin-bottom: 6px;
+            }
+
+            .value {
+              font-size: 20px;
+              font-weight: 700;
+            }
+
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 11px;
+            }
+
+            th {
+              background: #f3f4f6;
+              text-align: left;
+              font-weight: 700;
+            }
+
+            th,
+            td {
+              border: 1px solid #e5e7eb;
+              padding: 8px;
+            }
+
+            .number {
+              text-align: right;
+            }
+
+            @media print {
+              body {
+                padding: 0;
+              }
+            }
+          </style>
+        </head>
+
+        <body>
+          <h1>Inventory Valuation Report</h1>
+
+          <div class="meta">
+            Generated ${new Date().toLocaleString()}
+          </div>
+
+          <div class="summary">
+
+            <div class="card">
+              <div class="label">
+                Total Inventory Value
+              </div>
+
+              <div class="value">
+                ${money(totalValue)}
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="label">
+                Total Quantity
+              </div>
+
+              <div class="value">
+                ${number(totalQuantity)}
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="label">
+                Products
+              </div>
+
+              <div class="value">
+                ${number(uniqueProducts)}
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="label">
+                Average Unit Cost
+              </div>
+
+              <div class="value">
+                ${money(averageUnitCost)}
+              </div>
+            </div>
+
+          </div>
+
+          <h2>Valuation by Category</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Quantity</th>
+                <th>Inventory Value</th>
+                <th>% of Total</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              ${categoryHtml}
+            </tbody>
+          </table>
+
+          <h2>Product Valuation</h2>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Product Name</th>
+                <th>Product Code</th>
+                <th>Category</th>
+                <th>Quantity</th>
+                <th>Unit Cost</th>
+                <th>Inventory Value</th>
+                <th>% of Total</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              ${productHtml}
+            </tbody>
+          </table>
+
+        </body>
+      </html>
+    `);
+
+    printWindow.document.close();
+    printWindow.focus();
+
+    setTimeout(() => {
+      printWindow.print();
+    }, 300);
+  }
+
+  /*
+   * =========================================================
+   * CLEAR FILTERS
+   * =========================================================
+   */
+
+  function clearFilters() {
+    setProductFilter("");
+    setLocationFilter("");
+    setCategoryFilter("");
+    setSearch("");
+    setPage(1);
+  }
+
+  /*
+   * =========================================================
+   * LOADING
+   * =========================================================
+   */
+
+  if (!orgId && loading) {
+    return (
+      <Nav title="Inventory Valuation">
+        <div className="min-h-full bg-slate-950 p-6">
+          <div className="flex min-h-[300px] items-center justify-center">
+            <div className="text-xs uppercase tracking-widest text-slate-500">
+              Loading inventory valuation...
+            </div>
+          </div>
+        </div>
+      </Nav>
+    );
+  }
+
+  /*
+   * =========================================================
+   * PAGE
+   * =========================================================
+   */
+
+  return (
+    <Nav title="Inventory Valuation">
+      <div className="min-h-full bg-slate-950 p-4 md:p-6">
+
+        {/* HEADER */}
+
+        <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+
+          <div>
+            <h1 className="text-xl font-semibold tracking-wide text-slate-100">
+              Inventory Valuation Report
+            </h1>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Analyze inventory value, unit cost and value distribution.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+
+            <button
+              type="button"
+              onClick={exportExcel}
+              className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-emerald-500"
+            >
+              <Download size={15} />
+              Export Excel
+            </button>
+
+            <button
+              type="button"
+              onClick={exportPdf}
+              className="inline-flex items-center gap-2 rounded-md bg-red-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-red-500"
+            >
+              <FileText size={15} />
+              Export PDF
+            </button>
+
+          </div>
+
+        </div>
+
+        {/* ERROR */}
+
+        {error && (
+          <div className="mb-5 rounded-lg border border-red-900/60 bg-red-950/30 p-4 text-sm text-red-400">
+            <div className="font-semibold">
+              Unable to load valuation report
+            </div>
+
+            <div className="mt-1 text-xs text-red-400/80">
+              {error}
+            </div>
+          </div>
+        )}
+
+        {/* KPI CARDS */}
+
+        <div className="mb-5 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-5">
+
+            <div className="mb-2 text-[10px] font-medium uppercase tracking-widest text-slate-500">
+              Total Inventory Value
+            </div>
+
+            <div className="flex items-center justify-between">
+
+              <div className="text-2xl font-semibold text-emerald-400">
+                {money(totalValue)}
+              </div>
+
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-400">
+                <DollarSign size={18} />
+              </div>
+
+            </div>
+
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-5">
+
+            <div className="mb-2 text-[10px] font-medium uppercase tracking-widest text-slate-500">
+              Total Quantity
+            </div>
+
+            <div className="flex items-center justify-between">
+
+              <div className="text-2xl font-semibold text-slate-100">
+                {number(totalQuantity)}
+              </div>
+
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-orange-500/10 text-orange-400">
+                <Package size={18} />
+              </div>
+
+            </div>
+
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-5">
+
+            <div className="mb-2 text-[10px] font-medium uppercase tracking-widest text-slate-500">
+              Products
+            </div>
+
+            <div className="flex items-center justify-between">
+
+              <div className="text-2xl font-semibold text-slate-100">
+                {number(uniqueProducts)}
+              </div>
+
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-500/10 text-blue-400">
+                <Package size={18} />
+              </div>
+
+            </div>
+
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-5">
+
+            <div className="mb-2 text-[10px] font-medium uppercase tracking-widest text-slate-500">
+              Average Unit Cost
+            </div>
+
+            <div className="flex items-center justify-between">
+
+              <div className="text-2xl font-semibold text-slate-100">
+                {money(averageUnitCost)}
+              </div>
+
+              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-purple-500/10 text-purple-400">
+                <TrendingUp size={18} />
+              </div>
+
+            </div>
+
+          </div>
+
+        </div>
+
+        {/* FILTERS */}
+
+        <div className="mb-5 rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+
+          <div className="mb-4 text-xs font-medium uppercase tracking-widest text-slate-400">
+            Filters
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+
+            <div>
+              <label className="mb-1.5 block text-xs text-slate-400">
+                Products
+              </label>
+
+              <select
+                value={productFilter}
+                onChange={(event) =>
+                  setProductFilter(event.target.value)
+                }
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none focus:border-orange-500"
+              >
+                <option value="">
+                  All Products
+                </option>
+
+                {productOptions.map((product) => (
+                  <option
+                    key={product.key}
+                    value={
+                      product.code ||
+                      product.name
+                    }
+                  >
+                    {product.name}
+                    {product.code
+                      ? ` — ${product.code}`
+                      : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs text-slate-400">
+                Locations
+              </label>
+
+              <select
+                value={locationFilter}
+                onChange={(event) =>
+                  setLocationFilter(event.target.value)
+                }
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none focus:border-orange-500"
+              >
+                <option value="">
+                  All Locations
+                </option>
+
+                {locationOptions.map((location) => (
+                  <option
+                    key={location}
+                    value={location}
+                  >
+                    {location}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs text-slate-400">
+                Category
+              </label>
+
+              <select
+                value={categoryFilter}
+                onChange={(event) =>
+                  setCategoryFilter(event.target.value)
+                }
+                className="w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200 outline-none focus:border-orange-500"
+              >
+                <option value="">
+                  All Categories
+                </option>
+
+                {CATEGORIES.map((category) => (
+                  <option
+                    key={category}
+                    value={category}
+                  >
+                    {category}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-xs text-slate-400">
+                Search
+              </label>
+
+              <div className="relative">
+
+                <Search
+                  size={15}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-600"
+                />
+
+                <input
+                  value={search}
+                  onChange={(event) =>
+                    setSearch(event.target.value)
+                  }
+                  placeholder="Search products..."
+                  className="w-full rounded-md border border-slate-700 bg-slate-950 py-2 pl-9 pr-3 text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-orange-500"
+                />
+
+              </div>
+            </div>
+
+          </div>
+
+          {(productFilter ||
+            locationFilter ||
+            categoryFilter ||
+            search) && (
+            <div className="mt-4 flex justify-end">
+
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="inline-flex items-center gap-1.5 text-xs text-slate-500 transition hover:text-orange-400"
+              >
+                <X size={13} />
+                Clear Filters
+              </button>
+
+            </div>
+          )}
+
+        </div>
+
+        {/* CATEGORY VALUATION */}
+
+        <div className="mb-5 rounded-lg border border-slate-800 bg-slate-900/30 p-5">
+
+          <div className="mb-5">
+
+            <h2 className="text-sm font-medium text-slate-200">
+              Inventory Value by Category
+            </h2>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Distribution of current inventory value across trades.
+            </p>
+
+          </div>
+
+          {categoryData.length === 0 ? (
+
+            <div className="py-10 text-center text-xs text-slate-600">
+              No inventory valuation data available.
+            </div>
+
+          ) : (
+
+            <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+
+              {categoryData.map((row) => {
+
+                const width =
+                  Math.max(
+                    2,
+                    (row.value /
+                      categoryMaxValue) *
+                      100
+                  );
+
+                return (
+                  <div
+                    key={row.category}
+                  >
+
+                    <div className="mb-2 flex items-center justify-between">
+
+                      <div className="text-xs font-medium text-slate-300">
+                        {row.category}
+                      </div>
+
+                      <div className="font-mono text-xs text-emerald-400">
+                        {money(row.value)}
+                      </div>
+
+                    </div>
+
+                    <div className="h-3 overflow-hidden rounded-full bg-slate-800">
+
+                      <div
+                        className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                        style={{
+                          width: `${width}%`,
+                        }}
+                      />
+
+                    </div>
+
+                    <div className="mt-1 flex justify-between text-[10px] text-slate-600">
+
+                      <span>
+                        {number(row.qty)} units
+                      </span>
+
+                      <span>
+                        {percent(
+                          row.percentage
+                        )}
+                      </span>
+
+                    </div>
+
+                  </div>
+                );
+              })}
+
+            </div>
+
+          )}
+
+        </div>
+
+        {/* VIEW SWITCHER */}
+
+        <div className="mb-4 flex items-center justify-between">
+
+          <div>
+
+            <div className="text-[10px] font-medium uppercase tracking-widest text-slate-500">
+              Valuation Analysis
+            </div>
+
+            <div className="mt-1 text-xs text-slate-600">
+              {viewMode === "report"
+                ? "Detailed product valuation"
+                : "Visual value distribution"}
+            </div>
+
+          </div>
+
+          <div className="flex overflow-hidden rounded-md border border-slate-800 bg-slate-950">
+
+            <button
+              type="button"
+              onClick={() =>
+                setViewMode("report")
+              }
+              className={`inline-flex items-center gap-2 px-3 py-2 text-xs transition ${
+                viewMode === "report"
+                  ? "bg-slate-800 text-slate-100"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              <Table2 size={14} />
+              Report View
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                setViewMode("graph")
+              }
+              className={`inline-flex items-center gap-2 px-3 py-2 text-xs transition ${
+                viewMode === "graph"
+                  ? "bg-orange-600 text-white"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              <BarChart3 size={14} />
+              Graph View
+            </button>
+
+          </div>
+
+        </div>
+
+        {/* =====================================================
+            REPORT VIEW
+            ===================================================== */}
+
+        {viewMode === "report" ? (
+
+          <div className="overflow-hidden rounded-lg border border-slate-800 bg-slate-900/30">
+
+            <div className="border-b border-slate-800 px-4 py-3">
+
+              <div className="text-xs text-slate-400">
+
+                Showing{" "}
+
+                <span className="font-medium text-slate-200">
+                  {sortedRows.length}
+                </span>{" "}
+
+                products
+
+              </div>
+
+            </div>
+
+            <div className="overflow-x-auto">
+
+              <table className="w-full min-w-[1000px]">
+
+                <thead>
+
+                  <tr className="border-b border-slate-800 bg-slate-950/70">
+
+                    <th
+                      onClick={() =>
+                        handleSort("name")
+                      }
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Product Name{" "}
+                      {sortIndicator("name")}
+                    </th>
+
+                    <th
+                      onClick={() =>
+                        handleSort("code")
+                      }
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Product Code{" "}
+                      {sortIndicator("code")}
+                    </th>
+
+                    <th
+                      onClick={() =>
+                        handleSort("category")
+                      }
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Category{" "}
+                      {sortIndicator("category")}
+                    </th>
+
+                    <th
+                      onClick={() =>
+                        handleSort("qty")
+                      }
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      On Hand{" "}
+                      {sortIndicator("qty")}
+                    </th>
+
+                    <th
+                      onClick={() =>
+                        handleSort("unitCost")
+                      }
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Unit Cost{" "}
+                      {sortIndicator(
+                        "unitCost"
+                      )}
+                    </th>
+
+                    <th
+                      onClick={() =>
+                        handleSort("value")
+                      }
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Inventory Value{" "}
+                      {sortIndicator("value")}
+                    </th>
+
+                    <th
+                      onClick={() =>
+                        handleSort("percentage")
+                      }
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      % of Total{" "}
+                      {sortIndicator(
+                        "percentage"
+                      )}
+                    </th>
+
+                  </tr>
+
+                </thead>
+
+                <tbody>
+
+                  {loading ? (
+
+                    <tr>
+
+                      <td
+                        colSpan={7}
+                        className="px-4 py-12 text-center text-xs text-slate-600"
+                      >
+                        Loading valuation report...
+                      </td>
+
+                    </tr>
+
+                  ) : pageRows.length === 0 ? (
+
+                    <tr>
+
+                      <td
+                        colSpan={7}
+                        className="px-4 py-12 text-center text-xs text-slate-600"
+                      >
+                        No valuation data available.
+                      </td>
+
+                    </tr>
+
+                  ) : (
+
+                    pageRows.map((row) => (
+
+                      <tr
+                        key={row.key}
+                        className="border-b border-slate-800/70 transition hover:bg-slate-900/70"
+                      >
+
+                        <td className="px-4 py-3 text-xs font-medium text-slate-200">
+                          {row.productName}
+                        </td>
+
+                        <td className="px-4 py-3 font-mono text-xs text-slate-400">
+                          {row.productCode ||
+                            "—"}
+                        </td>
+
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {row.category}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-200">
+                          {number(row.qty)}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">
+                          {money(
+                            row.unitCost
+                          )}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs font-medium text-emerald-400">
+                          {money(row.value)}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">
+                          {percent(
+                            row.percentage
+                          )}
+                        </td>
+
+                      </tr>
+
+                    ))
+
+                  )}
+
+                </tbody>
+
+              </table>
+
+            </div>
+
+            {/* PAGINATION */}
+
+            <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-3 md:flex-row md:items-center md:justify-between">
+
+              <div className="text-xs text-slate-500">
+
+                Showing{" "}
+
+                {sortedRows.length === 0
+                  ? 0
+                  : (safePage - 1) *
+                      pageSize +
+                    1}
+
+                {" "}to{" "}
+
+                {Math.min(
+                  safePage * pageSize,
+                  sortedRows.length
+                )}
+
+                {" "}of{" "}
+
+                {sortedRows.length} entries
+
+              </div>
+
+              <div className="flex items-center gap-2">
+
+                <select
+                  value={pageSize}
+                  onChange={(event) =>
+                    setPageSize(
+                      Number(
+                        event.target.value
+                      )
+                    )
+                  }
+                  className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-300 outline-none"
+                >
+                  <option value={10}>
+                    10 per page
+                  </option>
+
+                  <option value={25}>
+                    25 per page
+                  </option>
+
+                  <option value={50}>
+                    50 per page
+                  </option>
+
+                  <option value={100}>
+                    100 per page
+                  </option>
+
+                </select>
+
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() =>
+                    setPage(1)
+                  }
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  First
+                </button>
+
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() =>
+                    setPage((current) =>
+                      Math.max(
+                        1,
+                        current - 1
+                      )
+                    )
+                  }
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  Previous
+                </button>
+
+                <div className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white">
+                  {safePage}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={
+                    safePage >=
+                    totalPages
+                  }
+                  onClick={() =>
+                    setPage((current) =>
+                      Math.min(
+                        totalPages,
+                        current + 1
+                      )
+                    )
+                  }
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  Next
+                </button>
+
+                <button
+                  type="button"
+                  disabled={
+                    safePage >=
+                    totalPages
+                  }
+                  onClick={() =>
+                    setPage(totalPages)
+                  }
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  Last
+                </button>
+
+              </div>
+
+            </div>
+
+          </div>
+
+        ) : (
+
+          /* ===================================================
+             GRAPH VIEW
+             =================================================== */
+
+          <div className="space-y-5">
+
+            {/* TOP PRODUCTS BY VALUE */}
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-5">
+
+              <div className="mb-6">
+
+                <h2 className="text-sm font-medium text-slate-200">
+                  Inventory Value by Product
+                </h2>
+
+                <p className="mt-1 text-xs text-slate-500">
+                  Top products ranked by current inventory value.
+                </p>
+
+              </div>
+
+              {graphRows.length === 0 ? (
+
+                <div className="flex min-h-[300px] items-center justify-center text-xs text-slate-600">
+                  No valuation data available.
+                </div>
+
+              ) : (
+
+                <div className="space-y-5">
+
+                  {graphRows.map((row) => {
+
+                    const width =
+                      Math.max(
+                        2,
+                        (row.value /
+                          graphMaxValue) *
+                          100
+                      );
+
+                    return (
+                      <div
+                        key={row.key}
+                      >
+
+                        <div className="mb-2 flex items-end justify-between gap-4">
+
+                          <div className="min-w-0">
+
+                            <div className="truncate text-xs font-medium text-slate-200">
+                              {row.productName}
+                            </div>
+
+                            <div className="mt-1 text-[10px] text-slate-600">
+                              {row.productCode ||
+                                "No product code"}
+                            </div>
+
+                          </div>
+
+                          <div className="shrink-0 font-mono text-xs font-medium text-emerald-400">
+                            {money(row.value)}
+                          </div>
+
+                        </div>
+
+                        <div className="h-4 overflow-hidden rounded-full bg-slate-800">
+
+                          <div
+                            className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                            style={{
+                              width: `${width}%`,
+                            }}
+                          />
+
+                        </div>
+
+                        <div className="mt-1 flex justify-between text-[10px] text-slate-600">
+
+                          <span>
+                            {number(row.qty)} units
+                          </span>
+
+                          <span>
+                            {percent(
+                              row.percentage
+                            )} of inventory
+                          </span>
+
+                        </div>
+
+                      </div>
+                    );
+                  })}
+
+                  {productValuation.length >
+                    25 && (
+                    <div className="border-t border-slate-800 pt-4 text-center text-[10px] uppercase tracking-widest text-slate-600">
+                      Showing top 25 products by inventory value
+                    </div>
+                  )}
+
+                </div>
+
+              )}
+
+            </div>
+
+            {/* CATEGORY GRAPH */}
+
+            <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-5">
+
+              <div className="mb-6">
+
+                <h2 className="text-sm font-medium text-slate-200">
+                  Value Distribution by Category
+                </h2>
+
+                <p className="mt-1 text-xs text-slate-500">
+                  Percentage of total inventory value represented by each trade.
+                </p>
+
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+
+                {categoryData.map((row) => (
+
+                  <div
+                    key={row.category}
+                    className="rounded-lg border border-slate-800 bg-slate-950/50 p-4"
+                  >
+
+                    <div className="mb-4 flex items-center justify-between">
+
+                      <div className="text-xs font-medium text-slate-300">
+                        {row.category}
+                      </div>
+
+                      <div className="font-mono text-xs text-emerald-400">
+                        {percent(
+                          row.percentage
+                        )}
+                      </div>
+
+                    </div>
+
+                    <div className="mb-4 text-2xl font-semibold text-slate-100">
+                      {money(row.value)}
+                    </div>
+
+                    <div className="h-3 overflow-hidden rounded-full bg-slate-800">
+
+                      <div
+                        className="h-full rounded-full bg-orange-500"
+                        style={{
+                          width: `${Math.max(
+                            2,
+                            row.percentage
+                          )}%`,
+                        }}
+                      />
+
+                    </div>
+
+                    <div className="mt-2 text-[10px] text-slate-600">
+                      {number(row.qty)} units
+                    </div>
+
+                  </div>
+
+                ))}
+
+              </div>
+
+            </div>
+
+          </div>
+
+        )}
+
+      </div>
+    </Nav>
+  );
+}
