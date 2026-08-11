@@ -396,6 +396,8 @@ export default function PODetailPage() {
                     <Th className="text-right">Total</Th>
                     <Th className="text-right">Received</Th>
                     <Th className="text-right">Receivable</Th>
+                    <Th className="text-right">Returned</Th>
+                    <Th></Th>
                   </tr>
                 </thead>
                 <tbody>
@@ -414,6 +416,14 @@ export default function PODetailPage() {
                         <Td className="text-right f-mono">
                           {receivable > 0 ? <span className="text-amber-400">{receivable}</span> : <span className="text-slate-600">0</span>}
                         </Td>
+                        {/* Returns aren't built yet (see Returns tab) -- always 0 for now */}
+                        <Td className="text-right f-mono text-slate-600">0</Td>
+                        <Td>
+                          <div className="flex gap-1.5 justify-end">
+                            <IconBtn onClick={() => flagComingSoon("Editing individual line items")}><Pencil size={12} /></IconBtn>
+                            <IconBtn danger onClick={() => flagComingSoon("Deleting individual line items")}><Trash2 size={12} /></IconBtn>
+                          </div>
+                        </Td>
                       </tr>
                     );
                   })}
@@ -422,7 +432,7 @@ export default function PODetailPage() {
                   <tr className="border-t border-slate-700">
                     <Td colSpan={4} className="text-slate-400 f-mono text-xs uppercase">Total</Td>
                     <Td className="text-right f-mono text-emerald-400 font-medium">{money(total)}</Td>
-                    <Td colSpan={2}></Td>
+                    <Td colSpan={4}></Td>
                   </tr>
                 </tfoot>
               </table>
@@ -474,6 +484,17 @@ export default function PODetailPage() {
             <div className="text-sm text-slate-300">{po.notes}</div>
           </Panel>
         )}
+
+        <Panel title="Attachments" icon={FileText}>
+          <div
+            onClick={() => flagComingSoon("File attachments")}
+            className="border border-dashed border-slate-700 rounded p-8 text-center cursor-pointer hover:border-slate-600"
+          >
+            <FileDown size={20} className="mx-auto mb-2 text-slate-600" />
+            <div className="text-sm text-slate-400">No attachments yet</div>
+            <div className="text-xs text-slate-600 mt-1">PDF, DOC, DOCX, XLS, XLSX, JPG, PNG (Max 10MB)</div>
+          </div>
+        </Panel>
       </div>
 
       {receiveModalOpen && (

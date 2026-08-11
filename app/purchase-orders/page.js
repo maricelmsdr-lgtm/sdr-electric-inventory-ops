@@ -66,6 +66,11 @@ export default function PurchaseOrdersPage() {
   const [sortBy, setSortBy] = useState("date_desc");
   const [openRowId, setOpenRowId] = useState(null); // expanded row (chevron)
   const [openActionsId, setOpenActionsId] = useState(null);
+  const [plannerNotice, setPlannerNotice] = useState(false);
+  const flagPlannerComingSoon = () => {
+    setPlannerNotice(true);
+    setTimeout(() => setPlannerNotice(false), 2500);
+  };
 
   useEffect(() => {
     (async () => {
@@ -365,7 +370,7 @@ export default function PurchaseOrdersPage() {
     <Nav title="Purchase Orders">
       <div className="p-4 md:p-6">
         {/* ================= HEADER ================= */}
-        <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-orange-500/15 flex items-center justify-center">
               <ShoppingCart size={19} className="text-orange-400" />
@@ -378,15 +383,44 @@ export default function PurchaseOrdersPage() {
           <PrimaryBtn onClick={openWizard} disabled={parts.length === 0}><Plus size={15} /> New Purchase</PrimaryBtn>
         </div>
 
+        {/* ================= SUB-TABS (Purchase Orders / Purchase Planner) ================= */}
+        <div className="flex items-center gap-4 border-b border-slate-800 mb-3 text-sm">
+          <button className="pb-2 px-1 flex items-center gap-1.5 text-orange-400 border-b-2 border-orange-500">
+            <ShoppingCart size={14} /> Purchase Orders
+          </button>
+          <button
+            onClick={() => flagPlannerComingSoon()}
+            className="pb-2 px-1 flex items-center gap-1.5 text-slate-500 hover:text-slate-300"
+          >
+            <Package size={14} /> Purchase Planner
+          </button>
+        </div>
+
         {parts.length === 0 && <div className="text-sm text-amber-400 mb-3">Add at least one part before creating a PO.</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
+        {plannerNotice && (
+          <div className="text-xs text-amber-400 mb-3 border border-amber-900/40 bg-amber-950/20 rounded px-3 py-2">
+            Purchase Planner isn't built yet — coming in a future update.
+          </div>
+        )}
 
-        {/* ================= FILTERS BAR ================= */}
+        {/* ================= FILTERS ROW ================= */}
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
           <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] f-mono uppercase tracking-wide text-slate-500 mr-1">Filters</span>
             <select className={`${inputCls} w-auto`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">All Status</option>
               {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            {/* Email-sent and payment tracking don't exist in the schema yet
+                (see Payment card on the PO Detail page) -- these two filters
+                are here for layout parity but only have the "All" option
+                until that data exists. Future session. */}
+            <select className={`${inputCls} w-auto`} disabled title="Not tracked yet — coming in a future update">
+              <option>All Email</option>
+            </select>
+            <select className={`${inputCls} w-auto`} disabled title="Not tracked yet — coming in a future update">
+              <option>All Payments</option>
             </select>
             <select className={`${inputCls} w-auto`} value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)}>
               <option value="">Vendor</option>
