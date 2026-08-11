@@ -217,7 +217,7 @@ export default function PODetailPage() {
           <style>
             body { font-family: Arial, sans-serif; padding: 32px; color: #111; }
             .company-header { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #eee; padding-bottom: 16px; margin-bottom: 24px; }
-            .company-header img { height: 60px; }
+            .company-header img { height: 100px; }
             .company-contact { text-align: right; font-size: 12px; color: #444; line-height: 1.5; }
             .company-contact .name { font-weight: bold; font-size: 14px; color: #111; margin-bottom: 2px; }
             h1 { font-size: 20px; margin-bottom: 4px; }
