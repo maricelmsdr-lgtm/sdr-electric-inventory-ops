@@ -8,20 +8,20 @@ import {
   FileText,
   Search,
   X,
+  BarChart3,
+  Table2,
 } from "lucide-react";
 import Nav from "@/components/Nav";
 
 const CATEGORIES = ["Electrical", "Plumbing", "HVAC", "General"];
 
 function money(value) {
-  const n = Number(value || 0);
-
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(n);
+  }).format(Number(value || 0));
 }
 
 function number(value) {
@@ -43,6 +43,15 @@ function escapeCsv(value) {
   }
 
   return text;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function downloadFile(content, filename, type) {
@@ -79,6 +88,8 @@ export default function InventoryOnHandPage() {
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+
+  const [viewMode, setViewMode] = useState("report");
 
   /*
    * ---------------------------------------------------------
@@ -159,14 +170,6 @@ export default function InventoryOnHandPage() {
         setLoading(true);
         setError("");
 
-        /*
-         * We intentionally select * here because the current
-         * SDR schema has evolved during the inventory-engine
-         * work. This allows the report to work with the existing
-         * parts records without depending on columns that may
-         * differ between migrations.
-         */
-
         const partsResult = await supabase
           .from("parts")
           .select("*")
@@ -176,19 +179,13 @@ export default function InventoryOnHandPage() {
           throw partsResult.error;
         }
 
-        /*
-         * Locations are optional for this report.
-         *
-         * If the locations table is not available or RLS blocks
-         * it, the inventory report will still work using parts.
-         */
-
         const locationsResult = await supabase
           .from("locations")
           .select("*")
           .eq("org_id", orgId);
 
         const loadedParts = partsResult.data || [];
+
         const loadedLocations =
           locationsResult.error || !locationsResult.data
             ? []
@@ -226,17 +223,15 @@ export default function InventoryOnHandPage() {
     const map = new Map();
 
     for (const location of locations) {
-      const id = location.id;
-
-      if (!id) continue;
+      if (!location.id) continue;
 
       map.set(
-        id,
+        location.id,
         location.name ||
           location.location_name ||
           location.title ||
           location.code ||
-          id
+          location.id
       );
     }
 
@@ -321,7 +316,6 @@ export default function InventoryOnHandPage() {
         "General";
 
       const locationId = getLocationId(part);
-
       const locationName = getLocationName(part);
 
       return {
@@ -342,7 +336,7 @@ export default function InventoryOnHandPage() {
 
   /*
    * ---------------------------------------------------------
-   * FILTERS
+   * FILTER OPTIONS
    * ---------------------------------------------------------
    */
 
@@ -377,8 +371,16 @@ export default function InventoryOnHandPage() {
       }
     }
 
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
+    return Array.from(names).sort((a, b) =>
+      a.localeCompare(b)
+    );
   }, [inventoryRows]);
+
+  /*
+   * ---------------------------------------------------------
+   * FILTER
+   * ---------------------------------------------------------
+   */
 
   const filteredRows = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -434,7 +436,7 @@ export default function InventoryOnHandPage() {
 
   /*
    * ---------------------------------------------------------
-   * SORTING
+   * SORT
    * ---------------------------------------------------------
    */
 
@@ -483,7 +485,10 @@ export default function InventoryOnHandPage() {
           break;
       }
 
-      if (typeof av === "number" && typeof bv === "number") {
+      if (
+        typeof av === "number" &&
+        typeof bv === "number"
+      ) {
         return sortDirection === "asc"
           ? av - bv
           : bv - av;
@@ -533,6 +538,47 @@ export default function InventoryOnHandPage() {
 
   /*
    * ---------------------------------------------------------
+   * GRAPH DATA
+   *
+   * Aggregate duplicate product/location rows so the graph
+   * represents the inventory correctly.
+   * ---------------------------------------------------------
+   */
+
+  const graphRows = useMemo(() => {
+    const map = new Map();
+
+    for (const row of filteredRows) {
+      const key = row.productCode || row.productName;
+
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          productName: row.productName,
+          productCode: row.productCode,
+          qty: 0,
+          totalValue: 0,
+        });
+      }
+
+      const existing = map.get(key);
+
+      existing.qty += row.qty;
+      existing.totalValue += row.totalValue;
+    }
+
+    return Array.from(map.values()).sort(
+      (a, b) => b.qty - a.qty
+    );
+  }, [filteredRows]);
+
+  const graphMaxQty = Math.max(
+    ...graphRows.map((row) => row.qty),
+    1
+  );
+
+  /*
+   * ---------------------------------------------------------
    * PAGINATION
    * ---------------------------------------------------------
    */
@@ -574,6 +620,7 @@ export default function InventoryOnHandPage() {
       setSortDirection((current) =>
         current === "asc" ? "desc" : "asc"
       );
+
       return;
     }
 
@@ -586,12 +633,14 @@ export default function InventoryOnHandPage() {
       return "↕";
     }
 
-    return sortDirection === "asc" ? "↑" : "↓";
+    return sortDirection === "asc"
+      ? "↑"
+      : "↓";
   }
 
   /*
    * ---------------------------------------------------------
-   * EXPORT EXCEL
+   * EXPORT EXCEL / CSV
    * ---------------------------------------------------------
    */
 
@@ -638,9 +687,6 @@ export default function InventoryOnHandPage() {
    * ---------------------------------------------------------
    * EXPORT PDF
    * ---------------------------------------------------------
-   *
-   * Uses the browser print dialog so we don't introduce another
-   * PDF library into the existing application.
    */
 
   function exportPdf() {
@@ -808,14 +854,11 @@ export default function InventoryOnHandPage() {
     }, 300);
   }
 
-  function escapeHtml(value) {
-    return String(value ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#039;");
-  }
+  /*
+   * ---------------------------------------------------------
+   * CLEAR FILTERS
+   * ---------------------------------------------------------
+   */
 
   function clearFilters() {
     setProductFilter("");
@@ -854,6 +897,7 @@ export default function InventoryOnHandPage() {
   return (
     <Nav title="Inventory On Hand">
       <div className="min-h-full bg-slate-950 p-4 md:p-6">
+
         {/* HEADER */}
 
         <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -863,8 +907,7 @@ export default function InventoryOnHandPage() {
             </h1>
 
             <p className="mt-1 text-xs text-slate-500">
-              Current inventory quantities, locations, costs and
-              valuation.
+              Current inventory quantities, locations, costs and valuation.
             </p>
           </div>
 
@@ -892,6 +935,7 @@ export default function InventoryOnHandPage() {
         {/* KPI CARDS */}
 
         <div className="mb-5 grid grid-cols-1 gap-4 md:grid-cols-3">
+
           <div className="rounded-lg border border-slate-800 bg-slate-900/70 p-5">
             <div className="mb-2 text-[10px] font-medium uppercase tracking-widest text-slate-500">
               Products
@@ -939,6 +983,7 @@ export default function InventoryOnHandPage() {
               </div>
             </div>
           </div>
+
         </div>
 
         {/* ERROR */}
@@ -958,11 +1003,13 @@ export default function InventoryOnHandPage() {
         {/* FILTERS */}
 
         <div className="mb-5 rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+
           <div className="mb-4 text-xs font-medium uppercase tracking-widest text-slate-400">
             Filters
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+
             {/* PRODUCT */}
 
             <div>
@@ -1076,6 +1123,7 @@ export default function InventoryOnHandPage() {
                 />
               </div>
             </div>
+
           </div>
 
           {(productFilter ||
@@ -1093,242 +1141,404 @@ export default function InventoryOnHandPage() {
               </button>
             </div>
           )}
+
         </div>
 
-        {/* TABLE */}
+        {/* REPORT / GRAPH TOGGLE */}
 
-        <div className="overflow-hidden rounded-lg border border-slate-800 bg-slate-900/30">
-          <div className="border-b border-slate-800 px-4 py-3">
-            <div className="text-xs text-slate-400">
-              Showing{" "}
-              <span className="font-medium text-slate-200">
-                {sortedRows.length}
-              </span>{" "}
-              {sortedRows.length === 1
-                ? "product"
-                : "products"}
+        <div className="mb-4 flex items-center justify-between">
+
+          <div>
+            <div className="text-[10px] font-medium uppercase tracking-widest text-slate-500">
+              Inventory Analysis
+            </div>
+
+            <div className="mt-1 text-xs text-slate-600">
+              {viewMode === "report"
+                ? "Detailed inventory report"
+                : "Visual inventory analysis"}
             </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1000px]">
-              <thead>
-                <tr className="border-b border-slate-800 bg-slate-950/70">
-                  <th
-                    onClick={() => handleSort("name")}
-                    className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    Product Name{" "}
-                    {sortIndicator("name")}
-                  </th>
+          <div className="flex overflow-hidden rounded-md border border-slate-800 bg-slate-950">
 
-                  <th
-                    onClick={() => handleSort("code")}
-                    className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    Product Code{" "}
-                    {sortIndicator("code")}
-                  </th>
+            <button
+              type="button"
+              onClick={() => setViewMode("report")}
+              className={`inline-flex items-center gap-2 px-3 py-2 text-xs transition ${
+                viewMode === "report"
+                  ? "bg-slate-800 text-slate-100"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              <Table2 size={14} />
+              Report View
+            </button>
 
-                  <th
-                    onClick={() =>
-                      handleSort("category")
-                    }
-                    className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    Category{" "}
-                    {sortIndicator("category")}
-                  </th>
+            <button
+              type="button"
+              onClick={() => setViewMode("graph")}
+              className={`inline-flex items-center gap-2 px-3 py-2 text-xs transition ${
+                viewMode === "graph"
+                  ? "bg-orange-600 text-white"
+                  : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              <BarChart3 size={14} />
+              Graph View
+            </button>
 
-                  <th
-                    onClick={() =>
-                      handleSort("location")
-                    }
-                    className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    Location{" "}
-                    {sortIndicator("location")}
-                  </th>
+          </div>
 
-                  <th
-                    className="px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500"
-                  >
-                    UOM
-                  </th>
+        </div>
 
-                  <th
-                    onClick={() => handleSort("qty")}
-                    className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    On Hand Qty{" "}
-                    {sortIndicator("qty")}
-                  </th>
+        {/* =====================================================
+            REPORT VIEW
+            ===================================================== */}
 
-                  <th
-                    onClick={() =>
-                      handleSort("unitCost")
-                    }
-                    className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    Unit Cost{" "}
-                    {sortIndicator("unitCost")}
-                  </th>
+        {viewMode === "report" ? (
 
-                  <th
-                    onClick={() => handleSort("value")}
-                    className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
-                  >
-                    Total Value{" "}
-                    {sortIndicator("value")}
-                  </th>
-                </tr>
-              </thead>
+          <div className="overflow-hidden rounded-lg border border-slate-800 bg-slate-900/30">
 
-              <tbody>
-                {loading ? (
-                  <tr>
-                    <td
-                      colSpan={8}
-                      className="px-4 py-12 text-center text-xs text-slate-600"
+            <div className="border-b border-slate-800 px-4 py-3">
+              <div className="text-xs text-slate-400">
+                Showing{" "}
+                <span className="font-medium text-slate-200">
+                  {sortedRows.length}
+                </span>{" "}
+                {sortedRows.length === 1
+                  ? "product"
+                  : "products"}
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+
+              <table className="w-full min-w-[1000px]">
+
+                <thead>
+                  <tr className="border-b border-slate-800 bg-slate-950/70">
+
+                    <th
+                      onClick={() => handleSort("name")}
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
                     >
-                      Loading inventory...
-                    </td>
+                      Product Name {sortIndicator("name")}
+                    </th>
+
+                    <th
+                      onClick={() => handleSort("code")}
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Product Code {sortIndicator("code")}
+                    </th>
+
+                    <th
+                      onClick={() => handleSort("category")}
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Category {sortIndicator("category")}
+                    </th>
+
+                    <th
+                      onClick={() => handleSort("location")}
+                      className="cursor-pointer px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Location {sortIndicator("location")}
+                    </th>
+
+                    <th className="px-4 py-3 text-left text-[10px] font-medium uppercase tracking-widest text-slate-500">
+                      UOM
+                    </th>
+
+                    <th
+                      onClick={() => handleSort("qty")}
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      On Hand Qty {sortIndicator("qty")}
+                    </th>
+
+                    <th
+                      onClick={() => handleSort("unitCost")}
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Unit Cost {sortIndicator("unitCost")}
+                    </th>
+
+                    <th
+                      onClick={() => handleSort("value")}
+                      className="cursor-pointer px-4 py-3 text-right text-[10px] font-medium uppercase tracking-widest text-slate-500 hover:text-slate-300"
+                    >
+                      Total Value {sortIndicator("value")}
+                    </th>
+
                   </tr>
-                ) : pageRows.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan={8}
-                      className="px-4 py-12 text-center text-xs text-slate-600"
-                    >
-                      No inventory data available.
-                    </td>
-                  </tr>
-                ) : (
-                  pageRows.map((row) => (
-                    <tr
-                      key={row.id}
-                      className="border-b border-slate-800/70 transition hover:bg-slate-900/70"
-                    >
-                      <td className="px-4 py-3 text-xs font-medium text-slate-200">
-                        {row.productName}
-                      </td>
+                </thead>
 
-                      <td className="px-4 py-3 font-mono text-xs text-slate-400">
-                        {row.productCode || "—"}
-                      </td>
+                <tbody>
 
-                      <td className="px-4 py-3 text-xs text-slate-400">
-                        {row.category}
-                      </td>
+                  {loading ? (
 
-                      <td className="px-4 py-3 text-xs text-slate-400">
-                        {row.locationName}
-                      </td>
-
-                      <td className="px-4 py-3 text-xs text-slate-400">
-                        {row.uom}
-                      </td>
-
-                      <td className="px-4 py-3 text-right font-mono text-xs text-slate-200">
-                        {number(row.qty)}
-                      </td>
-
-                      <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">
-                        {money(row.unitCost)}
-                      </td>
-
-                      <td className="px-4 py-3 text-right font-mono text-xs font-medium text-emerald-400">
-                        {money(row.totalValue)}
+                    <tr>
+                      <td
+                        colSpan={8}
+                        className="px-4 py-12 text-center text-xs text-slate-600"
+                      >
+                        Loading inventory...
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
 
-          {/* PAGINATION */}
+                  ) : pageRows.length === 0 ? (
 
-          <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-3 md:flex-row md:items-center md:justify-between">
-            <div className="text-xs text-slate-500">
-              Showing{" "}
-              {sortedRows.length === 0
-                ? 0
-                : (safePage - 1) * pageSize + 1}{" "}
-              to{" "}
-              {Math.min(
-                safePage * pageSize,
-                sortedRows.length
-              )}{" "}
-              of {sortedRows.length} entries
+                    <tr>
+                      <td
+                        colSpan={8}
+                        className="px-4 py-12 text-center text-xs text-slate-600"
+                      >
+                        No inventory data available.
+                      </td>
+                    </tr>
+
+                  ) : (
+
+                    pageRows.map((row) => (
+
+                      <tr
+                        key={row.id}
+                        className="border-b border-slate-800/70 transition hover:bg-slate-900/70"
+                      >
+
+                        <td className="px-4 py-3 text-xs font-medium text-slate-200">
+                          {row.productName}
+                        </td>
+
+                        <td className="px-4 py-3 font-mono text-xs text-slate-400">
+                          {row.productCode || "—"}
+                        </td>
+
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {row.category}
+                        </td>
+
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {row.locationName}
+                        </td>
+
+                        <td className="px-4 py-3 text-xs text-slate-400">
+                          {row.uom}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-200">
+                          {number(row.qty)}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">
+                          {money(row.unitCost)}
+                        </td>
+
+                        <td className="px-4 py-3 text-right font-mono text-xs font-medium text-emerald-400">
+                          {money(row.totalValue)}
+                        </td>
+
+                      </tr>
+
+                    ))
+
+                  )}
+
+                </tbody>
+
+              </table>
+
             </div>
 
-            <div className="flex items-center gap-2">
-              <select
-                value={pageSize}
-                onChange={(event) =>
-                  setPageSize(
-                    Number(event.target.value)
-                  )
-                }
-                className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-300 outline-none"
-              >
-                <option value={10}>10 per page</option>
-                <option value={25}>25 per page</option>
-                <option value={50}>50 per page</option>
-                <option value={100}>100 per page</option>
-              </select>
+            {/* PAGINATION */}
 
-              <button
-                type="button"
-                disabled={safePage <= 1}
-                onClick={() => setPage(1)}
-                className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
-              >
-                First
-              </button>
+            <div className="flex flex-col gap-3 border-t border-slate-800 px-4 py-3 md:flex-row md:items-center md:justify-between">
 
-              <button
-                type="button"
-                disabled={safePage <= 1}
-                onClick={() =>
-                  setPage((current) =>
-                    Math.max(1, current - 1)
-                  )
-                }
-                className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
-              >
-                Previous
-              </button>
-
-              <div className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white">
-                {safePage}
+              <div className="text-xs text-slate-500">
+                Showing{" "}
+                {sortedRows.length === 0
+                  ? 0
+                  : (safePage - 1) * pageSize + 1}{" "}
+                to{" "}
+                {Math.min(
+                  safePage * pageSize,
+                  sortedRows.length
+                )}{" "}
+                of {sortedRows.length} entries
               </div>
 
-              <button
-                type="button"
-                disabled={safePage >= totalPages}
-                onClick={() =>
-                  setPage((current) =>
-                    Math.min(totalPages, current + 1)
-                  )
-                }
-                className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
-              >
-                Next
-              </button>
+              <div className="flex items-center gap-2">
 
-              <button
-                type="button"
-                disabled={safePage >= totalPages}
-                onClick={() => setPage(totalPages)}
-                className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
-              >
-                Last
-              </button>
+                <select
+                  value={pageSize}
+                  onChange={(event) =>
+                    setPageSize(
+                      Number(event.target.value)
+                    )
+                  }
+                  className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-300 outline-none"
+                >
+                  <option value={10}>10 per page</option>
+                  <option value={25}>25 per page</option>
+                  <option value={50}>50 per page</option>
+                  <option value={100}>100 per page</option>
+                </select>
+
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage(1)}
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  First
+                </button>
+
+                <button
+                  type="button"
+                  disabled={safePage <= 1}
+                  onClick={() =>
+                    setPage((current) =>
+                      Math.max(1, current - 1)
+                    )
+                  }
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  Previous
+                </button>
+
+                <div className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white">
+                  {safePage}
+                </div>
+
+                <button
+                  type="button"
+                  disabled={safePage >= totalPages}
+                  onClick={() =>
+                    setPage((current) =>
+                      Math.min(totalPages, current + 1)
+                    )
+                  }
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  Next
+                </button>
+
+                <button
+                  type="button"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage(totalPages)}
+                  className="rounded-md border border-slate-800 px-3 py-1.5 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-40 hover:text-slate-200"
+                >
+                  Last
+                </button>
+
+              </div>
+
             </div>
+
           </div>
-        </div>
+
+        ) : (
+
+          /* ===================================================
+             GRAPH VIEW
+             =================================================== */
+
+          <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-5">
+
+            <div className="mb-6 flex flex-col gap-1">
+              <h2 className="text-sm font-medium text-slate-200">
+                Inventory Quantity by Product
+              </h2>
+
+              <p className="text-xs text-slate-500">
+                Current on-hand quantity for the selected filters.
+              </p>
+            </div>
+
+            {graphRows.length === 0 ? (
+
+              <div className="flex min-h-[300px] items-center justify-center text-xs text-slate-600">
+                No inventory data available for the selected filters.
+              </div>
+
+            ) : (
+
+              <div className="space-y-5">
+
+                {graphRows.slice(0, 25).map((row) => {
+
+                  const width = Math.max(
+                    2,
+                    (row.qty / graphMaxQty) * 100
+                  );
+
+                  return (
+                    <div key={row.key}>
+
+                      <div className="mb-2 flex items-end justify-between gap-4">
+
+                        <div className="min-w-0">
+
+                          <div className="truncate text-xs font-medium text-slate-200">
+                            {row.productName}
+                          </div>
+
+                          <div className="mt-1 text-[10px] text-slate-600">
+                            {row.productCode ||
+                              "No product code"}
+                          </div>
+
+                        </div>
+
+                        <div className="shrink-0 font-mono text-xs font-medium text-orange-400">
+                          {number(row.qty)}
+                        </div>
+
+                      </div>
+
+                      <div className="h-4 overflow-hidden rounded-full bg-slate-800">
+
+                        <div
+                          className="h-full rounded-full bg-orange-500 transition-all duration-500"
+                          style={{
+                            width: `${width}%`,
+                          }}
+                        />
+
+                      </div>
+
+                      <div className="mt-1 flex justify-between text-[10px] text-slate-600">
+                        <span>
+                          Inventory Value
+                        </span>
+
+                        <span className="font-mono">
+                          {money(row.totalValue)}
+                        </span>
+                      </div>
+
+                    </div>
+                  );
+
+                })}
+
+                {graphRows.length > 25 && (
+                  <div className="border-t border-slate-800 pt-4 text-center text-[10px] uppercase tracking-widest text-slate-600">
+                    Showing top 25 products by quantity
+                  </div>
+                )}
+
+              </div>
+
+            )}
+
+          </div>
+
+        )}
+
       </div>
     </Nav>
   );
