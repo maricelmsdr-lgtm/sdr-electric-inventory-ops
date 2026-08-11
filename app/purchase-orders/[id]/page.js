@@ -235,8 +235,8 @@ export default function PODetailPage() {
               <div class="name">SDR Electric, Plumbing &amp; Heating Inc.</div>
               8221 County Rd 21<br/>
               North Augusta, ON Canada K0G 1R0<br/>
-              Phone: (613) 926-1623 · (800) 725-2067 · (613) 801-0689<br/>
-              Email: office@sdrelectric.ca · accounting@sdrelectric.ca · info@sdrelectric.ca
+              Phone: (613) 926-1623<br/>
+              Email: info@sdrelectric.ca
             </div>
           </div>
           <h1>Purchase Order ${po.po_no}</h1>
