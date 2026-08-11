@@ -44,6 +44,8 @@ export default function PODetailPage() {
   const [cloning, setCloning] = useState(false);
   const [tab, setTab] = useState("lines");
   const [comingSoon, setComingSoon] = useState(null); // { label } for the toast/notice
+  const [attachments, setAttachments] = useState([]);
+  const [uploadingFile, setUploadingFile] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -78,7 +80,70 @@ export default function PODetailPage() {
     if (err) setError(err.message);
     setPo(data || null);
     setLoading(false);
+    fetchAttachments();
   };
+
+  const fetchAttachments = async () => {
+    const { data } = await supabase
+      .from("po_attachments")
+      .select("*")
+      .eq("po_id", poId)
+      .order("created_at", { ascending: false });
+    setAttachments(data || []);
+  };
+
+  const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10MB, matches the UI copy
+  const ALLOWED_EXTENSIONS = ["pdf", "doc", "docx", "xls", "xlsx", "jpg", "jpeg", "png"];
+
+  const uploadAttachment = async (file) => {
+    if (!file) return;
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      setError(`"${file.name}" isn't a supported file type. Allowed: PDF, DOC, DOCX, XLS, XLSX, JPG, PNG.`);
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      setError(`"${file.name}" is over the 10MB limit.`);
+      return;
+    }
+
+    setUploadingFile(true);
+    setError("");
+    try {
+      const path = `${orgId}/${poId}/${Date.now()}-${file.name}`;
+      const { error: upErr } = await supabase.storage.from("po-attachments").upload(path, file);
+      if (upErr) throw upErr;
+
+      const { error: insErr } = await supabase.from("po_attachments").insert({
+        org_id: orgId,
+        po_id: poId,
+        file_path: path,
+        file_name: file.name,
+        file_size: file.size,
+        uploaded_by: user?.id || null,
+      });
+      if (insErr) throw insErr;
+
+      await logActivity(`Attached "${file.name}" to PO ${po.po_no}`);
+      fetchAttachments();
+    } catch (e) {
+      setError(e.message || "Could not upload the file.");
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
+  const deleteAttachment = async (att) => {
+    setError("");
+    const { error: storageErr } = await supabase.storage.from("po-attachments").remove([att.file_path]);
+    if (storageErr) { setError(storageErr.message); return; }
+    const { error: rowErr } = await supabase.from("po_attachments").delete().eq("id", att.id);
+    if (rowErr) { setError(rowErr.message); return; }
+    fetchAttachments();
+  };
+
+  const attachmentUrl = (path) =>
+    supabase.storage.from("po-attachments").getPublicUrl(path).data.publicUrl;
 
   const logActivity = async (message) => {
     await supabase.from("activity_log").insert({ org_id: orgId, user_id: user.id, message });
@@ -346,7 +411,7 @@ export default function PODetailPage() {
               <Copy size={14} /> {cloning ? "Cloning..." : "Clone"}
             </button>
             <button
-              onClick={() => flagComingSoon("Editing from here — use the list page's Edit for now")}
+              onClick={() => router.push(`/purchase-orders?edit=${po.id}`)}
               className="p-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
             >
               <Pencil size={14} />
@@ -594,14 +659,44 @@ export default function PODetailPage() {
         )}
 
         <Panel title="Attachments" icon={FileText}>
-          <div
-            onClick={() => flagComingSoon("File attachments")}
-            className="border border-dashed border-slate-700 rounded p-8 text-center cursor-pointer hover:border-slate-600"
+          {attachments.length > 0 && (
+            <div className="mb-3 space-y-1.5">
+              {attachments.map((att) => (
+                <div key={att.id} className="flex items-center justify-between border border-slate-800 rounded px-3 py-2">
+                  <a
+                    href={attachmentUrl(att.file_path)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-orange-400 hover:underline truncate mr-3"
+                  >
+                    {att.file_name}
+                  </a>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[11px] text-slate-600">
+                      {att.file_size ? `${(att.file_size / 1024).toFixed(0)} KB` : ""}
+                    </span>
+                    <IconBtn danger onClick={() => deleteAttachment(att)}><Trash2 size={12} /></IconBtn>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <label
+            className={`block border border-dashed border-slate-700 rounded p-8 text-center cursor-pointer hover:border-slate-600 ${uploadingFile ? "opacity-60 pointer-events-none" : ""}`}
           >
+            <input
+              type="file"
+              className="hidden"
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
+              onChange={(e) => uploadAttachment(e.target.files?.[0])}
+              disabled={uploadingFile}
+            />
             <FileDown size={20} className="mx-auto mb-2 text-slate-600" />
-            <div className="text-sm text-slate-400">No attachments yet</div>
+            <div className="text-sm text-slate-400">
+              {uploadingFile ? "Uploading..." : attachments.length === 0 ? "No attachments yet — click to upload" : "Click to upload another file"}
+            </div>
             <div className="text-xs text-slate-600 mt-1">PDF, DOC, DOCX, XLS, XLSX, JPG, PNG (Max 10MB)</div>
-          </div>
+          </label>
         </Panel>
       </div>
 
