@@ -4,7 +4,8 @@ import { useRouter } from "next/navigation";
 import {
   ShoppingCart, Plus, Pencil, Trash2, Check, ArrowLeft, ArrowRight,
   Briefcase, Building2, Package, ClipboardCheck, X, Search, UserPlus,
-  Upload,
+  Upload, MapPin, Calendar, Mail, ChevronDown, ChevronRight, Download,
+  MoreVertical,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
@@ -21,6 +22,13 @@ const STATUS_STYLES = {
   Ordered: "border-sky-400/30 text-sky-400",
   Received: "border-emerald-400/30 text-emerald-400",
   Cancelled: "border-red-400/30 text-red-400",
+};
+// Status dot colors for the card-row layout (matches STATUS_STYLES text color)
+const STATUS_DOT = {
+  Open: "bg-slate-400",
+  Ordered: "bg-sky-400",
+  Received: "bg-emerald-400",
+  Cancelled: "bg-red-400",
 };
 
 const emptyLine = (parts) => ({ part_id: parts[0]?.id || "", qty: 1, unit_cost: parts[0]?.unit_cost || 0 });
@@ -40,6 +48,7 @@ export default function PurchaseOrdersPage() {
   const [parts, setParts] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [vendors, setVendors] = useState([]);
+  const [locations, setLocations] = useState([]);
   const [mainWarehouse, setMainWarehouse] = useState(null);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -48,6 +57,15 @@ export default function PurchaseOrdersPage() {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // ================= LIST FILTERS (card-row layout) =================
+  const [statusFilter, setStatusFilter] = useState("");
+  const [vendorFilter, setVendorFilter] = useState("");
+  const [deliveredToFilter, setDeliveredToFilter] = useState("");
+  const [zeroItemsOnly, setZeroItemsOnly] = useState(false);
+  const [sortBy, setSortBy] = useState("date_desc");
+  const [openRowId, setOpenRowId] = useState(null); // expanded row (chevron)
+  const [openActionsId, setOpenActionsId] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -74,7 +92,9 @@ export default function PurchaseOrdersPage() {
       supabase.from("parts").select("*").eq("org_id", orgId).order("part_no"),
       supabase
         .from("purchase_orders")
-        .select("*, po_line_items(*)")
+        // delivery_location:delivery_location_id pulls the delivered-to
+        // location's name via the FK, for the "Delivered To" column.
+        .select("*, po_line_items(*), delivery_location:delivery_location_id(id, name, type)")
         .eq("org_id", orgId)
         .order("po_date", { ascending: false }),
       supabase
@@ -91,8 +111,7 @@ export default function PurchaseOrdersPage() {
       supabase
         .from("locations")
         .select("id, name, type")
-        .eq("org_id", orgId)
-        .eq("type", "WAREHOUSE"),
+        .eq("org_id", orgId),
     ]);
 
     setError(
@@ -104,7 +123,8 @@ export default function PurchaseOrdersPage() {
     setPos(posData || []);
     setJobs(jobsData || []);
     setVendors(vendorsData || []);
-    setMainWarehouse((locData || [])[0] || null);
+    setLocations(locData || []);
+    setMainWarehouse((locData || []).find((l) => l.type === "WAREHOUSE") || null);
     setLoading(false);
   };
 
@@ -140,6 +160,7 @@ export default function PurchaseOrdersPage() {
         lineItems: lineItems.length ? lineItems : [emptyLine(parts)],
       },
     });
+    setOpenActionsId(null);
   };
 
   const save = async () => {
@@ -180,6 +201,7 @@ export default function PurchaseOrdersPage() {
     if (delErr) setError(delErr.message);
     else await logActivity(`Deleted PO ${po.po_no}`);
     setConfirmDelete(null);
+    setOpenActionsId(null);
     fetchAll();
   };
 
@@ -279,7 +301,61 @@ export default function PurchaseOrdersPage() {
     }
   };
 
-  const filtered = pos.filter((p) => `${p.po_no} ${p.vendor}`.toLowerCase().includes(q.toLowerCase()));
+  /*
+   * =========================================================
+   * LIST VIEW: FILTER + SORT (card-row layout)
+   * =========================================================
+   */
+
+  const filtered = pos
+    .filter((p) => `${p.po_no} ${p.vendor}`.toLowerCase().includes(q.toLowerCase()))
+    .filter((p) => (statusFilter ? p.status === statusFilter : true))
+    .filter((p) => (vendorFilter ? p.vendor === vendorFilter : true))
+    .filter((p) => (deliveredToFilter ? p.delivery_location?.id === deliveredToFilter : true))
+    .filter((p) => (zeroItemsOnly ? (p.po_line_items || []).length === 0 : true))
+    .sort((a, b) => {
+      if (sortBy === "date_desc") return new Date(b.po_date) - new Date(a.po_date);
+      if (sortBy === "date_asc") return new Date(a.po_date) - new Date(b.po_date);
+      if (sortBy === "vendor") return (a.vendor || "").localeCompare(b.vendor || "");
+      if (sortBy === "po_no") return (a.po_no || "").localeCompare(b.po_no || "");
+      return 0;
+    });
+
+  const uniqueVendorNames = [...new Set(pos.map((p) => p.vendor).filter(Boolean))].sort();
+
+  // Distinct-value dropdown filters (Status / Vendor / Delivered To / Sort)
+  // are all app-side over already-fetched POs — fine at this data volume,
+  // no extra round trips. "All Payments" / "All Email" are shown for
+  // layout parity with the reference design but aren't wired up: there's
+  // no payment or email-sent tracking on purchase_orders yet (the "Unpaid"
+  // / "Not Sent" badges below are static placeholders for the same reason)
+  // — future session.
+
+  const exportCsv = () => {
+    const header = ["PO No.", "Vendor", "Delivered To", "Date", "Status", "Items", "Total"];
+    const rows = filtered.map((p) => {
+      const total = (p.po_line_items || []).reduce((s, li) => s + li.qty * li.unit_cost, 0);
+      return [
+        p.po_no,
+        p.vendor,
+        p.delivery_location?.name || "",
+        p.po_date || "",
+        p.status,
+        (p.po_line_items || []).length,
+        total.toFixed(2),
+      ];
+    });
+    const csv = [header, ...rows]
+      .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `purchase-orders-${todayISO()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   if (!orgId) {
     return <div className="min-h-screen bg-slate-950 flex items-center justify-center"><div className="f-mono text-xs text-slate-500 uppercase tracking-widest">Loading...</div></div>;
@@ -288,38 +364,174 @@ export default function PurchaseOrdersPage() {
   return (
     <Nav title="Purchase Orders">
       <div className="p-4 md:p-6">
+        {/* ================= HEADER ================= */}
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-          <SearchInput value={q} onChange={setQ} placeholder="Search PO no, vendor..." />
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-orange-500/15 flex items-center justify-center">
+              <ShoppingCart size={19} className="text-orange-400" />
+            </div>
+            <div>
+              <div className="text-lg font-medium text-slate-100">Purchase Management</div>
+              <div className="text-xs text-slate-500">Track and manage your purchases efficiently</div>
+            </div>
+          </div>
           <PrimaryBtn onClick={openWizard} disabled={parts.length === 0}><Plus size={15} /> New Purchase</PrimaryBtn>
         </div>
+
         {parts.length === 0 && <div className="text-sm text-amber-400 mb-3">Add at least one part before creating a PO.</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
+
+        {/* ================= FILTERS BAR ================= */}
+        <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select className={`${inputCls} w-auto`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="">All Status</option>
+              {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select className={`${inputCls} w-auto`} value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)}>
+              <option value="">Vendor</option>
+              {uniqueVendorNames.map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+            <select className={`${inputCls} w-auto`} value={deliveredToFilter} onChange={(e) => setDeliveredToFilter(e.target.value)}>
+              <option value="">Delivered To</option>
+              {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+            <label className="flex items-center gap-1.5 text-sm text-slate-400 border border-slate-700 rounded px-2.5 py-2 cursor-pointer">
+              <input type="checkbox" checked={zeroItemsOnly} onChange={(e) => setZeroItemsOnly(e.target.checked)} />
+              Zero Items
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
+            <SearchInput value={q} onChange={setQ} placeholder="Search PO no, vendor..." />
+            <select className={`${inputCls} w-auto`} value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+              <option value="date_desc">Newest First</option>
+              <option value="date_asc">Oldest First</option>
+              <option value="vendor">Vendor A–Z</option>
+              <option value="po_no">PO No.</option>
+            </select>
+            <button
+              onClick={exportCsv}
+              className="px-3 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800 flex items-center gap-1.5"
+            >
+              <Download size={14} /> Excel
+            </button>
+          </div>
+        </div>
+
+        {/* ================= LIST (card rows) ================= */}
         <Panel title="Purchase Orders" icon={ShoppingCart}>
-          {loading ? <div className="text-sm text-slate-500 p-2">Loading...</div> : (
+          {loading ? (
+            <div className="text-sm text-slate-500 p-2">Loading...</div>
+          ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[700px]">
-                <thead><tr><Th>PO No.</Th><Th>Vendor</Th><Th>Date</Th><Th>Line Items</Th><Th className="text-right">Total</Th><Th>Status</Th><Th></Th></tr></thead>
+              <table className="w-full min-w-[900px]">
+                <thead>
+                  <tr>
+                    <Th>Purchase Details</Th>
+                    <Th>Vendor</Th>
+                    <Th>Delivered To</Th>
+                    <Th>Dates</Th>
+                    <Th>Status</Th>
+                    <Th>Payment</Th>
+                    <Th></Th>
+                  </tr>
+                </thead>
                 <tbody>
                   {filtered.map((p) => {
-                    const total = (p.po_line_items || []).reduce((s, li) => s + li.qty * li.unit_cost, 0);
+                    const itemCount = (p.po_line_items || []).length;
+                    const isOpen = openRowId === p.id;
                     return (
-                      <tr key={p.id} className="border-t border-slate-800/70 hover:bg-slate-900/40">
-                        <Td className="f-mono text-orange-400">{p.po_no}</Td>
-                        <Td>{p.vendor}</Td>
-                        <Td className="text-slate-400">{fmtDate(p.po_date)}</Td>
-                        <Td className="text-slate-400 text-xs">{(p.po_line_items || []).length} item{(p.po_line_items || []).length !== 1 ? "s" : ""}</Td>
-                        <Td className="text-right f-mono">{money(total)}</Td>
-                        <Td><Badge className={STATUS_STYLES[p.status] || STATUS_STYLES.Open}>{p.status}</Badge></Td>
+                      <tr key={p.id} className="border-t border-slate-800/70 hover:bg-slate-900/40 align-top">
                         <Td>
-                          <div className="flex gap-1.5 justify-end">
-                            <IconBtn onClick={() => openEdit(p)}><Pencil size={13} /></IconBtn>
-                            <IconBtn danger onClick={() => setConfirmDelete(p)}><Trash2 size={13} /></IconBtn>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => setOpenRowId(isOpen ? null : p.id)}
+                              className="shrink-0"
+                              title="Toggle line item preview"
+                            >
+                              {isOpen ? <ChevronDown size={14} className="text-slate-500" /> : <ChevronRight size={14} className="text-slate-500" />}
+                            </button>
+                            <button
+                              onClick={() => router.push(`/purchase-orders/${p.id}`)}
+                              className="f-mono text-orange-400 hover:underline text-left"
+                            >
+                              {p.po_no}
+                            </button>
+                          </div>
+                          <div className="mt-1 ml-5">
+                            <Badge className="border-slate-700 text-slate-400 text-[10px]">
+                              <Package size={10} className="inline -mt-0.5 mr-1" />
+                              {itemCount} item{itemCount !== 1 ? "s" : ""}
+                            </Badge>
+                          </div>
+                          {isOpen && (
+                            <div className="mt-2 ml-5 border border-slate-800 rounded overflow-hidden">
+                              {itemCount === 0 ? (
+                                <div className="text-xs text-slate-500 p-2">No line items.</div>
+                              ) : (
+                                (p.po_line_items || []).map((li) => {
+                                  const part = parts.find((pt) => pt.id === li.part_id);
+                                  return (
+                                    <div key={li.id} className="flex items-center justify-between px-2 py-1.5 border-b border-slate-800/60 last:border-0 text-xs">
+                                      <span className="text-slate-300">{part?.part_no || "Unknown part"}</span>
+                                      <span className="f-mono text-slate-500">{li.qty} × {money(li.unit_cost)}</span>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
+                        </Td>
+                        <Td className="text-slate-200 font-medium">{p.vendor}</Td>
+                        <Td>
+                          <div className="flex items-center gap-1.5 text-slate-300">
+                            <MapPin size={12} className="text-slate-500" />
+                            {p.delivery_location?.name || "—"}
+                          </div>
+                        </Td>
+                        <Td>
+                          <div className="flex items-center gap-1.5 text-slate-300">
+                            <Calendar size={12} className="text-slate-500" />
+                            {fmtDate(p.po_date)}
+                          </div>
+                        </Td>
+                        <Td>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[p.status] || STATUS_DOT.Open}`} />
+                            <Badge className={STATUS_STYLES[p.status] || STATUS_STYLES.Open}>{p.status}</Badge>
+                          </div>
+                          <div className="flex items-center gap-1 mt-1 text-[11px] text-slate-600">
+                            <Mail size={10} /> Not Sent
+                          </div>
+                        </Td>
+                        <Td>
+                          {/* No payment tracking on purchase_orders yet — static
+                              placeholder to match the reference layout. */}
+                          <Badge className="border-slate-700 text-slate-500">Unpaid</Badge>
+                        </Td>
+                        <Td>
+                          <div className="relative flex justify-end">
+                            <IconBtn onClick={() => setOpenActionsId(openActionsId === p.id ? null : p.id)}>
+                              <MoreVertical size={14} />
+                            </IconBtn>
+                            {openActionsId === p.id && (
+                              <div className="absolute right-0 top-8 w-36 bg-slate-900 border border-slate-800 rounded shadow-lg z-10 text-sm">
+                                <button onClick={() => openEdit(p)} className="w-full text-left px-3 py-2 hover:bg-slate-800 flex items-center gap-2">
+                                  <Pencil size={13} /> Edit
+                                </button>
+                                <button onClick={() => { setConfirmDelete(p); setOpenActionsId(null); }} className="w-full text-left px-3 py-2 hover:bg-slate-800 text-red-400 flex items-center gap-2">
+                                  <Trash2 size={13} /> Delete
+                                </button>
+                              </div>
+                            )}
                           </div>
                         </Td>
                       </tr>
                     );
                   })}
-                  {filtered.length === 0 && <tr><Td colSpan={7} className="text-slate-500">No purchase orders yet.</Td></tr>}
+                  {filtered.length === 0 && (
+                    <tr><Td colSpan={7} className="text-slate-500">No purchase orders match your filters.</Td></tr>
+                  )}
                 </tbody>
               </table>
             </div>
