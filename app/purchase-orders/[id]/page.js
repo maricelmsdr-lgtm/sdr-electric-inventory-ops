@@ -605,7 +605,7 @@ export default function PODetailPage() {
       )}
 
       {emailModalOpen && (
-        <SendEmailModal po={po} total={total} onClose={() => setEmailModalOpen(false)} />
+        <SendEmailModal po={po} total={total} user={user} onExportPdf={exportPdf} onClose={() => setEmailModalOpen(false)} />
       )}
 
       {confirmDelete && (
@@ -899,11 +899,11 @@ function ReturnItemsModal({ po, onClose, onReturned }) {
  * modal is where that API call would go instead.
  */
 
-function SendEmailModal({ po, total, onClose }) {
+function SendEmailModal({ po, total, user, onExportPdf, onClose }) {
   const [to, setTo] = useState("");
   const [subject, setSubject] = useState(`Purchase Order #${po.po_no}`);
   const [message, setMessage] = useState(
-    `Dear ${po.vendor},\n\nPlease find the purchase order details below for your reference.\n\n` +
+    `Dear ${po.vendor},\n\nPlease find attached the purchase order details for your reference.\n\n` +
     `Order Details:\n- Purchase Number: ${po.po_no}\n- Purchase Date: ${po.po_date}\n- Total: ${money(total)}\n\n` +
     `Thank you for your business.\n\nBest regards,`
   );
@@ -918,12 +918,10 @@ function SendEmailModal({ po, total, onClose }) {
 
   return (
     <ModalShell title="Send Email" icon={Mail} onClose={onClose} wide>
-      <div className="text-xs text-amber-400 mb-3 border border-amber-900/40 bg-amber-950/20 rounded px-3 py-2">
-        This opens your own email app with the message pre-filled — no automatic sending
-        or attachment yet (that needs an email service set up). Use the PDF button first
-        if you want to attach the order as a file.
+      <div className="mb-3">
+        <label className="text-xs text-slate-500 block mb-1">From</label>
+        <input className={inputCls} value={user?.email || ""} disabled />
       </div>
-
       <div className="mb-3">
         <label className="text-xs text-slate-500 block mb-1">To</label>
         <input
@@ -933,6 +931,7 @@ function SendEmailModal({ po, total, onClose }) {
           value={to}
           onChange={(e) => setTo(e.target.value)}
         />
+        <div className="text-[11px] text-slate-600 mt-1">Opens in your own email app when sent — see attachment note below.</div>
       </div>
       <div className="mb-3">
         <label className="text-xs text-slate-500 block mb-1">Subject</label>
@@ -947,10 +946,27 @@ function SendEmailModal({ po, total, onClose }) {
         />
       </div>
 
+      <div className="mb-1">
+        <label className="text-xs text-slate-500 block mb-1">Attachments</label>
+        <button
+          onClick={onExportPdf}
+          className="w-full flex items-center gap-3 border border-slate-700 bg-slate-900/60 rounded px-3 py-2.5 text-left hover:bg-slate-900"
+        >
+          <FileDown size={16} className="text-orange-400 shrink-0" />
+          <div className="flex-1">
+            <div className="text-sm text-slate-200">{po.po_no}.pdf</div>
+            <div className="text-[11px] text-slate-500">
+              Click to download — no email service is set up yet, so it can't attach
+              automatically. Save it, then attach it manually in the email that opens.
+            </div>
+          </div>
+        </button>
+      </div>
+
       <div className="flex justify-end gap-2 mt-4">
         <button onClick={onClose} className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
         <PrimaryBtn onClick={send} disabled={!to.trim()}>
-          <Mail size={15} /> Open in Email App
+          <Mail size={15} /> Send Email
         </PrimaryBtn>
       </div>
     </ModalShell>
