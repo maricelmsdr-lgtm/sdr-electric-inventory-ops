@@ -6,21 +6,11 @@ import { AlertTriangle } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
 
-type Part = {
-  id: string;
-  part_no: string | null;
-  sku: string | null;
-  category: string | null;
-  qty: number | null;
-  min_reorder: number | null;
-  org_id: string | null;
-};
-
 export default function ReorderReportPage() {
   const router = useRouter();
 
-  const [orgId, setOrgId] = useState<string | null>(null);
-  const [parts, setParts] = useState<Part[]>([]);
+  const [orgId, setOrgId] = useState(null);
+  const [parts, setParts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -109,7 +99,7 @@ export default function ReorderReportPage() {
         setError(partsError.message);
         setParts([]);
       } else {
-        setParts((data ?? []) as Part[]);
+        setParts(data || []);
       }
 
       setLoading(false);
@@ -127,8 +117,8 @@ export default function ReorderReportPage() {
   // ------------------------------------------------------------
   const lowStockParts = useMemo(() => {
     return parts.filter((part) => {
-      const qty = Number(part.qty ?? 0);
-      const minReorder = Number(part.min_reorder ?? 0);
+      const qty = Number(part.qty || 0);
+      const minReorder = Number(part.min_reorder || 0);
 
       return qty <= minReorder;
     });
@@ -145,9 +135,9 @@ export default function ReorderReportPage() {
     }
 
     return lowStockParts.filter((part) => {
-      const partNo = part.part_no?.toLowerCase() ?? "";
-      const sku = part.sku?.toLowerCase() ?? "";
-      const category = part.category?.toLowerCase() ?? "";
+      const partNo = part.part_no?.toLowerCase() || "";
+      const sku = part.sku?.toLowerCase() || "";
+      const category = part.category?.toLowerCase() || "";
 
       return (
         partNo.includes(q) ||
@@ -173,18 +163,20 @@ export default function ReorderReportPage() {
   return (
     <Nav title="Reorder Report">
       <div className="p-4 md:p-6 space-y-4">
-        {/* Error */}
+
         {error && (
           <div className="rounded-lg border border-red-900/50 bg-red-950/20 px-4 py-3 text-sm text-red-400">
             {error}
           </div>
         )}
 
-        {/* Main report */}
         <section className="rounded-xl border border-slate-800 bg-slate-900/50 overflow-hidden">
+
           {/* Header */}
           <div className="flex flex-col gap-4 border-b border-slate-800 p-4 md:flex-row md:items-center md:justify-between">
+
             <div className="flex items-center gap-3">
+
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/10">
                 <AlertTriangle
                   size={18}
@@ -201,6 +193,7 @@ export default function ReorderReportPage() {
                   Parts currently at or below minimum stock
                 </p>
               </div>
+
             </div>
 
             {/* Search */}
@@ -213,18 +206,22 @@ export default function ReorderReportPage() {
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none placeholder:text-slate-600 focus:border-slate-500"
               />
             </div>
+
           </div>
 
-          {/* Content */}
+          {/* Table */}
           {loading ? (
             <div className="p-6 text-sm text-slate-500">
               Loading inventory...
             </div>
           ) : (
             <div className="overflow-x-auto">
+
               <table className="w-full min-w-[760px]">
+
                 <thead>
                   <tr className="border-b border-slate-800">
+
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-500">
                       Part No.
                     </th>
@@ -248,15 +245,15 @@ export default function ReorderReportPage() {
                     <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-slate-500">
                       Suggested Order Qty
                     </th>
+
                   </tr>
                 </thead>
 
                 <tbody>
+
                   {filteredParts.map((part) => {
-                    const qty = Number(part.qty ?? 0);
-                    const minReorder = Number(
-                      part.min_reorder ?? 0
-                    );
+                    const qty = Number(part.qty || 0);
+                    const minReorder = Number(part.min_reorder || 0);
 
                     const suggestedOrderQty = Math.max(
                       minReorder * 2 - qty,
@@ -268,6 +265,7 @@ export default function ReorderReportPage() {
                         key={part.id}
                         className="border-b border-slate-800/70 hover:bg-slate-800/30"
                       >
+
                         <td className="px-4 py-3 font-mono text-sm text-slate-200">
                           {part.part_no || "—"}
                         </td>
@@ -293,6 +291,7 @@ export default function ReorderReportPage() {
                         <td className="px-4 py-3 text-right font-mono text-sm text-emerald-400">
                           {suggestedOrderQty}
                         </td>
+
                       </tr>
                     );
                   })}
@@ -309,10 +308,14 @@ export default function ReorderReportPage() {
                       </td>
                     </tr>
                   )}
+
                 </tbody>
+
               </table>
+
             </div>
           )}
+
         </section>
       </div>
     </Nav>
