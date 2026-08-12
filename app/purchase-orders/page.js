@@ -968,6 +968,43 @@ function POWizard({
   const [openCategories, setOpenCategories] = useState({});
   const toggleCategory = (cat) => setOpenCategories({ ...openCategories, [cat]: !openCategories[cat] });
 
+  // ---------------------------------------------------------------------
+  // LIVE SEARCH (server-side) — once the user types in the "Add Products"
+  // search box, query Supabase directly instead of only filtering the
+  // `parts` array loaded on page mount. That array is capped at
+  // Supabase's default 1000-row limit, so a part alphabetically past that
+  // cutoff (e.g. TYWRAP8MOUNTBLK on a catalog with thousands of rows)
+  // could exist and still never show up here. With no search term typed,
+  // this still falls back to browsing the local category groups above —
+  // only the actual free-text search is converted.
+  // ---------------------------------------------------------------------
+  const [liveSearchResults, setLiveSearchResults] = useState(null); // null = not searching, [] = searched, no matches
+  const [liveSearchLoading, setLiveSearchLoading] = useState(false);
+  const liveSearchDebounce = useState({ current: null })[0];
+
+  useEffect(() => {
+    if (!productSearch.trim()) {
+      setLiveSearchResults(null);
+      return;
+    }
+    if (liveSearchDebounce.current) clearTimeout(liveSearchDebounce.current);
+    liveSearchDebounce.current = setTimeout(async () => {
+      setLiveSearchLoading(true);
+      const q = productSearch.trim();
+      const { data, error } = await supabase
+        .from("parts")
+        .select("id, part_no, sku, category, unit_cost")
+        .eq("org_id", orgId)
+        .or(`part_no.ilike.%${q}%,sku.ilike.%${q}%`)
+        .order("part_no")
+        .limit(50);
+      setLiveSearchLoading(false);
+      if (!error) setLiveSearchResults(data || []);
+    }, 250);
+    return () => clearTimeout(liveSearchDebounce.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productSearch, orgId]);
+
   const isSelected = (partId) => wizard.lineItems.some((li) => li.part_id === partId);
 
   const toggleProduct = (part) => {
@@ -1250,51 +1287,102 @@ function POWizard({
             <div>
               <SearchInput value={productSearch} onChange={setProductSearch} placeholder="Search products by name, SKU..." />
               <div className="mt-3 border border-slate-800 rounded overflow-hidden">
-                {[...groupedParts.entries()].map(([cat, items]) => (
-                  <div key={cat} className="border-b border-slate-800 last:border-0">
-                    <button
-                      onClick={() => toggleCategory(cat)}
-                      className="w-full flex items-center justify-between px-3 py-2 bg-slate-900/60 hover:bg-slate-900"
-                    >
-                      <span className="text-sm text-slate-200">{cat}</span>
-                      <span className="text-xs f-mono text-slate-500">{items.length} items</span>
-                    </button>
-                    {openCategories[cat] && (
-                      <div>
-                        {items.map((part) => (
-                          <label
-                            key={part.id}
-                            className="flex items-center gap-3 px-3 py-2 border-t border-slate-800/60"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={isSelected(part.id)}
-                              onChange={() => toggleProduct(part)}
-                            />
-                            <div className="flex-1">
-                              <div className="text-sm text-slate-100">{part.part_no}</div>
-                              <div className="text-xs f-mono text-slate-500">{part.sku}</div>
-                            </div>
-                            {isSelected(part.id) && (
-                              <input
-                                type="number"
-                                min="1"
-                                className={`${inputCls} w-20`}
-                                value={wizard.lineItems.find((li) => li.part_id === part.id)?.qty || 1}
-                                onClick={(e) => e.preventDefault()}
-                                onChange={(e) => updateLineQty(part.id, e.target.value)}
-                              />
-                            )}
-                          </label>
-                        ))}
-                      </div>
+                {productSearch.trim() ? (
+                  // Live server-side search results — queries the full
+                  // catalog directly, not just whatever's in the local
+                  // `parts` array (which can be capped at 1000 rows).
+                  <div>
+                    {liveSearchLoading && (
+                      <div className="p-4 text-sm text-slate-500">Searching...</div>
                     )}
+                    {!liveSearchLoading && (liveSearchResults || []).length === 0 && (
+                      <div className="p-4 text-sm text-slate-500">No products found.</div>
+                    )}
+                    {!liveSearchLoading && (liveSearchResults || []).map((part) => (
+                      <label
+                        key={part.id}
+                        className="flex items-center gap-3 px-3 py-2 border-b border-slate-800/60 last:border-0"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected(part.id)}
+                          onChange={() => toggleProduct(part)}
+                        />
+                        <div className="flex-1">
+                          <div className="text-sm text-slate-100">{part.part_no}</div>
+                          <div className="text-xs f-mono text-slate-500">
+                            {part.sku}{part.category ? ` — ${part.category}` : ""}
+                          </div>
+                        </div>
+                        {isSelected(part.id) && (
+                          <input
+                            type="number"
+                            min="1"
+                            className={`${inputCls} w-20`}
+                            value={wizard.lineItems.find((li) => li.part_id === part.id)?.qty || 1}
+                            onClick={(e) => e.preventDefault()}
+                            onChange={(e) => updateLineQty(part.id, e.target.value)}
+                          />
+                        )}
+                      </label>
+                    ))}
                   </div>
-                ))}
-                {groupedParts.size === 0 && (
-                  <div className="p-4 text-sm text-slate-500">No products found.</div>
+                ) : (
+                  // No search term — browse by category, from the
+                  // locally-loaded parts array (same as before).
+                  <>
+                    {[...groupedParts.entries()].map(([cat, items]) => (
+                      <div key={cat} className="border-b border-slate-800 last:border-0">
+                        <button
+                          onClick={() => toggleCategory(cat)}
+                          className="w-full flex items-center justify-between px-3 py-2 bg-slate-900/60 hover:bg-slate-900"
+                        >
+                          <span className="text-sm text-slate-200">{cat}</span>
+                          <span className="text-xs f-mono text-slate-500">{items.length} items</span>
+                        </button>
+                        {openCategories[cat] && (
+                          <div>
+                            {items.map((part) => (
+                              <label
+                                key={part.id}
+                                className="flex items-center gap-3 px-3 py-2 border-t border-slate-800/60"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected(part.id)}
+                                  onChange={() => toggleProduct(part)}
+                                />
+                                <div className="flex-1">
+                                  <div className="text-sm text-slate-100">{part.part_no}</div>
+                                  <div className="text-xs f-mono text-slate-500">{part.sku}</div>
+                                </div>
+                                {isSelected(part.id) && (
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    className={`${inputCls} w-20`}
+                                    value={wizard.lineItems.find((li) => li.part_id === part.id)?.qty || 1}
+                                    onClick={(e) => e.preventDefault()}
+                                    onChange={(e) => updateLineQty(part.id, e.target.value)}
+                                  />
+                                )}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {groupedParts.size === 0 && (
+                      <div className="p-4 text-sm text-slate-500">No products found.</div>
+                    )}
+                  </>
                 )}
               </div>
+              {productSearch.trim() && (
+                <div className="text-[11px] text-slate-600 mt-2 px-1">
+                  Searching your full parts catalog (up to 50 matches shown). Clear the search to browse by category instead.
+                </div>
+              )}
             </div>
           )}
 

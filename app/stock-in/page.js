@@ -13,8 +13,8 @@ import {
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const fmtDate = (d) => (d ? new Date(d + "T00:00:00").toLocaleDateString() : "—");
 
-const emptyStockIn = (parts, locations) => ({
-  received_date: todayISO(), part_id: parts[0]?.id || "", qty: 1,
+const emptyStockIn = (locations) => ({
+  received_date: todayISO(), part_id: "", qty: 1,
   location_id: locations[0]?.id || "", vendor: "", po_ref: "", received_by: "",
   po_id: null, invoice_path: null,
 });
@@ -24,7 +24,12 @@ export default function StockInPage() {
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [stockIns, setStockIns] = useState([]);
-  const [parts, setParts] = useState([]);
+  // Only the parts actually referenced by stock-ins already on screen —
+  // fetched by exact id, so display never silently misses a part
+  // regardless of how large the full catalog is. PartPicker itself does
+  // its own live server-side search now, independent of this map.
+  const [partsById, setPartsById] = useState({});
+  const [hasAnyParts, setHasAnyParts] = useState(true);
   const [locations, setLocations] = useState([]);
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -49,26 +54,41 @@ export default function StockInPage() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [{ data: partsData }, { data: locData }, { data: siData, error: siErr }, { data: poData }] = await Promise.all([
-      supabase.from("parts").select("*").eq("org_id", orgId).order("part_no"),
+    const [{ data: locData }, { data: siData, error: siErr }, { data: poData }, { count: partsCount }] = await Promise.all([
       supabase.from("locations").select("*").eq("org_id", orgId).eq("active", true).order("type").order("name"),
       supabase.from("stock_ins").select("*").eq("org_id", orgId).order("received_date", { ascending: false }),
       supabase.from("purchase_orders").select("id, po_no, vendor").eq("org_id", orgId).order("po_date", { ascending: false }),
+      supabase.from("parts").select("id", { count: "exact", head: true }).eq("org_id", orgId),
     ]);
     setError(siErr?.message || "");
-    setParts(partsData || []);
     setLocations(locData || []);
     setStockIns(siData || []);
     setPurchaseOrders(poData || []);
+    setHasAnyParts((partsCount || 0) > 0);
+
+    const partIds = [...new Set((siData || []).map((s) => s.part_id).filter(Boolean))];
+    if (partIds.length > 0) {
+      const { data: partsData } = await supabase.from("parts").select("id, part_no, sku, unit_cost").in("id", partIds);
+      setPartsById(Object.fromEntries((partsData || []).map((p) => [p.id, p])));
+    } else {
+      setPartsById({});
+    }
+
     setLoading(false);
   };
 
   const poById = (id) => purchaseOrders.find((p) => p.id === id);
 
-  const partById = (id) => parts.find((p) => p.id === id);
+  const partById = (id) => partsById[id];
   const locationById = (id) => locations.find((l) => l.id === id);
 
-  const openCreate = () => setModal({ mode: "create", data: emptyStockIn(parts, locations) });
+  const partLabel = async (partId) => {
+    if (partsById[partId]) return partsById[partId].part_no;
+    const { data } = await supabase.from("parts").select("part_no").eq("id", partId).maybeSingle();
+    return data?.part_no || "";
+  };
+
+  const openCreate = () => setModal({ mode: "create", data: emptyStockIn(locations) });
   const openEdit = (s) => setModal({ mode: "edit", data: { ...s }, originalQty: s.qty, originalPartId: s.part_id, originalLocationId: s.location_id });
 
   const logActivity = async (message) => {
@@ -97,6 +117,10 @@ export default function StockInPage() {
 
   const save = async () => {
     const d = modal.data;
+    if (!d.part_id) {
+      setError("A part is required.");
+      return;
+    }
     if (!d.location_id) {
       setError("A location is required.");
       return;
@@ -108,7 +132,7 @@ export default function StockInPage() {
         const { error: insErr } = await supabase.from("stock_ins").insert({ ...d, org_id: orgId });
         if (insErr) throw insErr;
         { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: d.part_id, p_location_id: d.location_id, p_delta: Number(d.qty) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-        await logActivity(`Received ${d.qty} × ${partById(d.part_id)?.part_no || ""} into ${locationById(d.location_id)?.name || ""}`);
+        await logActivity(`Received ${d.qty} × ${await partLabel(d.part_id)} into ${locationById(d.location_id)?.name || ""}`);
       } else {
         const { id, ...rest } = d;
         const { error: updErr } = await supabase.from("stock_ins").update(rest).eq("id", id);
@@ -116,7 +140,7 @@ export default function StockInPage() {
         // Reverse the original receipt at its original location, then apply the new one
         { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: modal.originalPartId, p_location_id: modal.originalLocationId, p_delta: -Number(modal.originalQty) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
         { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: d.part_id, p_location_id: d.location_id, p_delta: Number(d.qty) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-        await logActivity(`Updated stock-in for ${partById(d.part_id)?.part_no || ""}`);
+        await logActivity(`Updated stock-in for ${await partLabel(d.part_id)}`);
       }
       setModal(null);
       fetchAll();
@@ -135,10 +159,11 @@ export default function StockInPage() {
     if (delErr) {
       setError(delErr.message || "Something went wrong deleting the receipt.");
     } else {
+      const label = await partLabel(s.part_id);
       await logActivity(
         rpcErr
-          ? `Deleted stock-in for ${partById(s.part_id)?.part_no || ""} (stock quantity could not be auto-reversed — check inventory manually)`
-          : `Deleted stock-in for ${partById(s.part_id)?.part_no || ""}`
+          ? `Deleted stock-in for ${label} (stock quantity could not be auto-reversed — check inventory manually)`
+          : `Deleted stock-in for ${label}`
       );
       if (rpcErr) {
         setError("Receipt deleted, but the stock quantity couldn't be auto-reversed (it may already be out of sync). Double-check that part's quantity.");
@@ -161,9 +186,9 @@ export default function StockInPage() {
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search part, vendor, PO ref..." />
-          <PrimaryBtn onClick={openCreate} disabled={parts.length === 0 || locations.length === 0}><Plus size={15} /> Receive Stock</PrimaryBtn>
+          <PrimaryBtn onClick={openCreate} disabled={!hasAnyParts || locations.length === 0}><Plus size={15} /> Receive Stock</PrimaryBtn>
         </div>
-        {parts.length === 0 && <div className="text-sm text-amber-400 mb-3">Add at least one part before receiving stock.</div>}
+        {!hasAnyParts && <div className="text-sm text-amber-400 mb-3">Add at least one part before receiving stock.</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         <Panel title="Stock In (Receiving)" icon={PackagePlus}>
           {loading ? <div className="text-sm text-slate-500 p-2">Loading...</div> : (
@@ -209,7 +234,7 @@ export default function StockInPage() {
         <ModalShell title={`${modal.mode === "create" ? "Receive" : "Edit"} Stock`} icon={PackagePlus} onClose={() => setModal(null)}>
           <Field label="Date"><input type="date" className={inputCls} value={modal.data.received_date} onChange={(e) => setModal({ ...modal, data: { ...modal.data, received_date: e.target.value } })} /></Field>
           <Field label="Part">
-            <PartPicker parts={parts} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
+            <PartPicker orgId={orgId} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
           </Field>
           <Field label="Qty Received"><input type="number" min="1" className={inputCls} value={modal.data.qty} onChange={(e) => setModal({ ...modal, data: { ...modal.data, qty: Number(e.target.value) } })} /></Field>
           <Field label="Receive Into">
