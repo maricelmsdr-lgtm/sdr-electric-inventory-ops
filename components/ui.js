@@ -232,8 +232,14 @@ export function PartPicker({ orgId, value, onChange, placeholder = "Type part no
   // Debounced server-side search — fires ~250ms after the user stops
   // typing, queries the full parts table for this org (not a local
   // array), capped at 50 matches shown.
+  //
+  // Guarded on `orgId` being present: without this, the query could fire
+  // before the parent page finished loading org_id (e.g. right after the
+  // modal opens on a fresh page load), sending org_id=eq.undefined to
+  // Supabase — an invalid filter that PostgREST rejects with a 400,
+  // which showed up in the UI as "No matching parts."
   useEffect(() => {
-    if (!open) return;
+    if (!open || !orgId) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
     debounceRef.current = setTimeout(async () => {
