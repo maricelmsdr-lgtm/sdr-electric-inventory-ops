@@ -392,7 +392,7 @@ function JobModal({ modal, setModal, parts, locations, saving, onCancel, onSave 
         </div>
         {d.lineItems.map((li, i) => (
           <div key={i} className="grid grid-cols-[2fr_0.7fr_1fr_1fr_auto] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0">
-            <PartPicker orgId={orgId} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
+            <PartPicker parts={parts} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
             <input type="number" min="1" className={inputCls} value={li.qty} onChange={(e) => updateLine(i, "qty", Number(e.target.value))} />
             <input type="number" step="0.01" className={inputCls} value={li.part_cost} onChange={(e) => updateLine(i, "part_cost", Number(e.target.value))} />
             <input type="number" step="0.01" className={inputCls} value={li.sale_cost} onChange={(e) => updateLine(i, "sale_cost", Number(e.target.value))} />
