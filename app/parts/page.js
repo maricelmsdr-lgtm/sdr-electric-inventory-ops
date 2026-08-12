@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Package, Plus, Pencil, Trash2, MapPin, AlertTriangle, Warehouse, ImagePlus,
   Truck, MoreVertical, Wrench, Layers, FolderOpen,
@@ -26,6 +26,7 @@ const TABS = [
 
 export default function PartsPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [parts, setParts] = useState([]);
@@ -34,7 +35,7 @@ export default function PartsPage() {
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [lowStockOnly, setLowStockOnly] = useState(false);
+  const [lowStockOnly, setLowStockOnly] = useState(searchParams.get("lowStock") === "1");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [modal, setModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
