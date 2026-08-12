@@ -13,8 +13,8 @@ const todayISO = () => new Date().toISOString().slice(0, 10);
 const fmtDate = (d) => (d ? new Date(d + "T00:00:00").toLocaleDateString() : "—");
 const REASONS = ["Damaged", "Lost", "Found", "Correction", "Return"];
 
-const emptyAdj = (parts, locations) => ({
-  adj_date: todayISO(), part_id: parts[0]?.id || "", location_id: locations[0]?.id || "",
+const emptyAdj = (locations) => ({
+  adj_date: todayISO(), part_id: "", location_id: locations[0]?.id || "",
   qty_change: 0, reason: "Correction", adjusted_by: "", notes: "",
 });
 
@@ -23,8 +23,14 @@ export default function StockAdjustmentsPage() {
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [adjustments, setAdjustments] = useState([]);
-  const [parts, setParts] = useState([]);
+  // Map of part id -> { part_no, sku } — only for parts actually referenced
+  // by adjustments already on screen. Fetched by exact id, so it can never
+  // silently miss a part regardless of how large the catalog is (unlike
+  // loading the whole `parts` table into memory, which used to be capped
+  // at Supabase's default 1000-row limit).
+  const [partsById, setPartsById] = useState({});
   const [locations, setLocations] = useState([]);
+  const [hasAnyParts, setHasAnyParts] = useState(true);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [modal, setModal] = useState(null); // { mode, data, originalQtyChange?, originalPartId?, originalLocationId? }
@@ -46,30 +52,60 @@ export default function StockAdjustmentsPage() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [{ data: partsData }, { data: locData }, { data: adjData, error: adjErr }] = await Promise.all([
-      supabase.from("parts").select("*").eq("org_id", orgId).order("part_no"),
+
+    const [{ data: locData }, { data: adjData, error: adjErr }, { count: partsCount }] = await Promise.all([
       supabase.from("locations").select("*").eq("org_id", orgId).eq("active", true).order("type").order("name"),
       supabase.from("stock_adjustments").select("*").eq("org_id", orgId).order("adj_date", { ascending: false }),
+      supabase.from("parts").select("id", { count: "exact", head: true }).eq("org_id", orgId),
     ]);
+
     setError(adjErr?.message || "");
-    setParts(partsData || []);
     setLocations(locData || []);
     setAdjustments(adjData || []);
+    setHasAnyParts((partsCount || 0) > 0);
+
+    // Fetch only the specific parts referenced by these adjustments — by
+    // exact id, so it works no matter how large the full catalog is.
+    const partIds = [...new Set((adjData || []).map((a) => a.part_id).filter(Boolean))];
+    if (partIds.length > 0) {
+      const { data: partsData } = await supabase
+        .from("parts")
+        .select("id, part_no, sku")
+        .in("id", partIds);
+      setPartsById(Object.fromEntries((partsData || []).map((p) => [p.id, p])));
+    } else {
+      setPartsById({});
+    }
+
     setLoading(false);
   };
 
-  const partById = (id) => parts.find((p) => p.id === id);
+  const partById = (id) => partsById[id];
   const locationById = (id) => locations.find((l) => l.id === id);
 
-  const openCreate = () => setModal({ mode: "create", data: emptyAdj(parts, locations) });
+  const openCreate = () => setModal({ mode: "create", data: emptyAdj(locations) });
   const openEdit = (a) => setModal({ mode: "edit", data: { ...a }, originalQtyChange: a.qty_change, originalPartId: a.part_id, originalLocationId: a.location_id });
 
   const logActivity = async (message) => {
     await supabase.from("activity_log").insert({ org_id: orgId, user_id: user.id, message });
   };
 
+  // Small helper so the activity log / error messages can show a real
+  // part number even for a part that isn't in `partsById` yet (e.g. one
+  // just picked in the modal that hasn't been persisted to an adjustment
+  // row, and therefore hasn't been fetched into partsById).
+  const partLabel = async (partId) => {
+    if (partsById[partId]) return partsById[partId].part_no;
+    const { data } = await supabase.from("parts").select("part_no").eq("id", partId).maybeSingle();
+    return data?.part_no || "";
+  };
+
   const save = async () => {
     const d = modal.data;
+    if (!d.part_id) {
+      setError("A part is required.");
+      return;
+    }
     if (!d.location_id) {
       setError("A location is required.");
       return;
@@ -81,7 +117,7 @@ export default function StockAdjustmentsPage() {
         const { error: insErr } = await supabase.from("stock_adjustments").insert({ ...d, org_id: orgId });
         if (insErr) throw insErr;
         { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: d.part_id, p_location_id: d.location_id, p_delta: Number(d.qty_change) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-        await logActivity(`Stock adjustment on ${partById(d.part_id)?.part_no || ""} at ${locationById(d.location_id)?.name || ""} (${d.qty_change > 0 ? "+" : ""}${d.qty_change})`);
+        await logActivity(`Stock adjustment on ${await partLabel(d.part_id)} at ${locationById(d.location_id)?.name || ""} (${d.qty_change > 0 ? "+" : ""}${d.qty_change})`);
       } else {
         const { id, ...rest } = d;
         const { error: updErr } = await supabase.from("stock_adjustments").update(rest).eq("id", id);
@@ -89,7 +125,7 @@ export default function StockAdjustmentsPage() {
         // Reverse the original delta at the original location, then apply the new one
         { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: modal.originalPartId, p_location_id: modal.originalLocationId, p_delta: -Number(modal.originalQtyChange) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
         { const { error: rpcErr } = await supabase.rpc("apply_inventory_qty_change", { p_org_id: orgId, p_part_id: d.part_id, p_location_id: d.location_id, p_delta: Number(d.qty_change) }); if (rpcErr) throw new Error(rpcErr.message.includes("chk_balance_quantity") ? "Not enough stock at that location." : rpcErr.message); }
-        await logActivity(`Updated stock adjustment on ${partById(d.part_id)?.part_no || ""}`);
+        await logActivity(`Updated stock adjustment on ${await partLabel(d.part_id)}`);
       }
       setModal(null);
       fetchAll();
@@ -108,10 +144,11 @@ export default function StockAdjustmentsPage() {
     if (delErr) {
       setError(delErr.message || "Something went wrong deleting the adjustment.");
     } else {
+      const label = await partLabel(a.part_id);
       await logActivity(
         rpcErr
-          ? `Deleted stock adjustment on ${partById(a.part_id)?.part_no || ""} (stock quantity could not be auto-reversed — check inventory manually)`
-          : `Deleted stock adjustment on ${partById(a.part_id)?.part_no || ""}`
+          ? `Deleted stock adjustment on ${label} (stock quantity could not be auto-reversed — check inventory manually)`
+          : `Deleted stock adjustment on ${label}`
       );
       if (rpcErr) {
         setError("Adjustment deleted, but the stock quantity couldn't be auto-reversed (it may already be out of sync). Double-check that part's quantity.");
@@ -134,9 +171,9 @@ export default function StockAdjustmentsPage() {
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search part, reason, adjusted by..." />
-          <PrimaryBtn onClick={openCreate} disabled={parts.length === 0 || locations.length === 0}><Plus size={15} /> New Adjustment</PrimaryBtn>
+          <PrimaryBtn onClick={openCreate} disabled={!hasAnyParts || locations.length === 0}><Plus size={15} /> New Adjustment</PrimaryBtn>
         </div>
-        {parts.length === 0 && <div className="text-sm text-amber-400 mb-3">Add at least one part before logging an adjustment.</div>}
+        {!hasAnyParts && <div className="text-sm text-amber-400 mb-3">Add at least one part before logging an adjustment.</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         <Panel title="Stock Adjustments" icon={SlidersHorizontal}>
           {loading ? <div className="text-sm text-slate-500 p-2">Loading...</div> : (
@@ -173,7 +210,7 @@ export default function StockAdjustmentsPage() {
         <ModalShell title={`${modal.mode === "create" ? "New" : "Edit"} Stock Adjustment`} icon={SlidersHorizontal} onClose={() => setModal(null)}>
           <Field label="Date"><input type="date" className={inputCls} value={modal.data.adj_date} onChange={(e) => setModal({ ...modal, data: { ...modal.data, adj_date: e.target.value } })} /></Field>
           <Field label="Part">
-            <PartPicker parts={parts} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
+            <PartPicker orgId={orgId} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
           </Field>
           <Field label="Location">
             <select className={inputCls} value={modal.data.location_id} onChange={(e) => setModal({ ...modal, data: { ...modal.data, location_id: e.target.value } })}>

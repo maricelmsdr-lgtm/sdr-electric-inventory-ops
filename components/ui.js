@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Search, X, AlertTriangle, Zap, Droplets, Wind, Package, MoreVertical } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 export const TRADE_STYLES = {
   Electrical: { text: "text-amber-400", bg: "bg-amber-400/10", border: "border-amber-400/30", dot: "bg-amber-400", icon: Zap },
@@ -164,20 +165,57 @@ export function Field({ label, children }) {
 // Type-to-search dropdown for picking a part by number or SKU — swap in
 // anywhere a plain <select> of parts would otherwise force scrolling
 // through a huge list (Jobs, Stock In, Stock Adjustments, POs, Loadouts,
-// Field Requests, Cycle Counts). Matches on part_no, sku, and description.
-export function PartPicker({ parts, value, onChange, placeholder = "Type part no. or SKU..." }) {
+// Field Requests, Cycle Counts).
+//
+// SERVER-SIDE SEARCH: this used to filter a `parts` array that had to be
+// fully loaded into memory first — which silently missed any part past
+// Supabase/PostgREST's default 1000-row cap on an unbounded .select("*").
+// A part like "TYWRAP8MOUNTBLK" (late alphabetically) could exist and
+// still never show up if the org had 1000+ parts. Now it queries
+// Supabase directly on every keystroke (debounced), always searching the
+// FULL catalog, capped only on how many results are shown at once (50) —
+// never on which parts are searchable.
+//
+// Props:
+//   orgId    — required. Which org's parts to search.
+//   value    — the selected part's id (or "").
+//   onChange — called with the new part id when the user picks one.
+export function PartPicker({ orgId, value, onChange, placeholder = "Type part no. or SKU..." }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
+  const [results, setResults] = useState([]);
+  const [loadingResults, setLoadingResults] = useState(false);
+  const [selected, setSelected] = useState(null); // { id, part_no, sku } for the current value
   const wrapRef = useRef(null);
+  const debounceRef = useRef(null);
 
-  const selected = parts.find((p) => p.id === value);
   const label = (p) => `${p.part_no}${p.sku ? " — " + p.sku : ""}`;
 
+  // Resolve the label for the current `value` (e.g. when the form opens
+  // in edit mode with a part already selected) via a single-row lookup —
+  // never relies on the part being present in any locally-cached list.
   useEffect(() => {
-    if (!open) setQuery(selected ? label(selected) : "");
+    let cancelled = false;
+    (async () => {
+      if (!value) {
+        setSelected(null);
+        setQuery("");
+        return;
+      }
+      const { data } = await supabase
+        .from("parts")
+        .select("id, part_no, sku")
+        .eq("id", value)
+        .maybeSingle();
+      if (!cancelled && data) {
+        setSelected(data);
+        setQuery(label(data));
+      }
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, parts.length]);
+  }, [value]);
 
   useEffect(() => {
     const onClickOutside = (e) => {
@@ -191,13 +229,44 @@ export function PartPicker({ parts, value, onChange, placeholder = "Type part no
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
-  const q = query.trim().toLowerCase();
-  const filtered = (
-    q ? parts.filter((p) => `${p.part_no} ${p.sku || ""} ${p.description || ""}`.toLowerCase().includes(q)) : parts
-  ).slice(0, 50);
+  // Debounced server-side search — fires ~250ms after the user stops
+  // typing, queries the full parts table for this org (not a local
+  // array), capped at 50 matches shown.
+  useEffect(() => {
+    if (!open) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(async () => {
+      setLoadingResults(true);
+      const q = query.trim();
+      let req = supabase
+        .from("parts")
+        .select("id, part_no, sku, description")
+        .eq("org_id", orgId)
+        .order("part_no")
+        .limit(50);
+
+      if (q) {
+        // Matches part_no, sku, or description containing the query.
+        req = req.or(
+          `part_no.ilike.%${q}%,sku.ilike.%${q}%,description.ilike.%${q}%`
+        );
+      }
+
+      const { data, error } = await req;
+      setLoadingResults(false);
+      if (!error) {
+        setResults(data || []);
+        setHighlight(0);
+      }
+    }, 250);
+
+    return () => clearTimeout(debounceRef.current);
+  }, [query, open, orgId]);
 
   const pick = (p) => {
     onChange(p.id);
+    setSelected(p);
     setQuery(label(p));
     setOpen(false);
   };
@@ -209,19 +278,22 @@ export function PartPicker({ parts, value, onChange, placeholder = "Type part no
         value={query}
         placeholder={placeholder}
         onFocus={() => { setOpen(true); setQuery(""); }}
-        onChange={(e) => { setQuery(e.target.value); setOpen(true); setHighlight(0); }}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
         onKeyDown={(e) => {
           if (!open) return;
-          if (e.key === "ArrowDown") { e.preventDefault(); setHighlight((h) => Math.min(h + 1, filtered.length - 1)); }
+          if (e.key === "ArrowDown") { e.preventDefault(); setHighlight((h) => Math.min(h + 1, results.length - 1)); }
           else if (e.key === "ArrowUp") { e.preventDefault(); setHighlight((h) => Math.max(h - 1, 0)); }
-          else if (e.key === "Enter") { e.preventDefault(); if (filtered[highlight]) pick(filtered[highlight]); }
+          else if (e.key === "Enter") { e.preventDefault(); if (results[highlight]) pick(results[highlight]); }
           else if (e.key === "Escape") { setOpen(false); setQuery(selected ? label(selected) : ""); }
         }}
       />
       {open && (
         <div className="absolute z-30 mt-1 w-full max-h-56 overflow-y-auto bg-slate-900 border border-slate-700 rounded shadow-lg">
-          {filtered.length === 0 && <div className="px-3 py-2 text-sm text-slate-500">No matching parts.</div>}
-          {filtered.map((p, i) => (
+          {loadingResults && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
+          {!loadingResults && results.length === 0 && (
+            <div className="px-3 py-2 text-sm text-slate-500">No matching parts.</div>
+          )}
+          {!loadingResults && results.map((p, i) => (
             <button
               type="button"
               key={p.id}
