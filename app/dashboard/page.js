@@ -1,169 +1,532 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useParams } from "next/navigation";
 import {
-  LayoutDashboard, Package, AlertTriangle, ShoppingCart, Briefcase, Truck, History,
+  ArrowLeft, User, FileText, DollarSign, Package, Truck,
+  RotateCcw, History, ShoppingCart, MessageSquare, Check, Send,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import Nav from "@/components/Nav";
-import { Panel, Th, Td, Badge, TradeBadge, money } from "@/components/ui";
+import { Panel, Th, Td, Badge, money, PrimaryBtn, ModalShell, inputCls, IconBtn, PartPicker } from "@/components/ui";
 
-const fmtDate = (d) => (d ? new Date(d + "T00:00:00").toLocaleDateString() : "—");
-const fmtDateTime = (ts) => (ts ? new Date(ts).toLocaleString() : "—");
+const fmtDate = (d) => (d ? new Date(d + "T00:00:00").toLocaleDateString() : "NA");
+const fmtDateTime = (d) => (d ? new Date(d).toLocaleString() : "NA");
 
-function StatCard({ label, value, icon: Icon, accent }) {
-  return (
-    <div className="bg-slate-900/70 border border-slate-800 rounded-lg p-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-[11px] f-mono uppercase text-slate-500">{label}</span>
-        {Icon && <Icon size={15} className={accent || "text-orange-500"} />}
-      </div>
-      <div className={`f-display text-2xl ${accent || "text-slate-100"}`}>{value}</div>
-    </div>
-  );
-}
+const STATUS_STYLES = {
+  Open: "border-slate-600 text-slate-400",
+  Ordered: "border-sky-400/30 text-sky-400",
+  Received: "border-emerald-400/30 text-emerald-400",
+  Cancelled: "border-red-400/30 text-red-400",
+};
 
-export default function DashboardPage() {
+const TABS = [
+  { key: "planned", label: "Planned Materials", icon: Package },
+  { key: "issued", label: "Issued Materials", icon: FileText },
+  { key: "purchases", label: "Purchases", icon: Truck },
+  { key: "returned", label: "Returned Materials", icon: RotateCcw },
+  { key: "history", label: "Job History", icon: History },
+];
+
+export default function JobDetailPage() {
   const router = useRouter();
+  const params = useParams();
+  const jobId = params?.id;
+
   const [orgId, setOrgId] = useState(null);
+  const [user, setUser] = useState(null);
+  const [job, setJob] = useState(null);
+  const [purchases, setPurchases] = useState([]);
+  const [issuedMaterials, setIssuedMaterials] = useState([]);
   const [parts, setParts] = useState([]);
-  const [jobs, setJobs] = useState([]);
-  const [pos, setPos] = useState([]);
-  const [fleet, setFleet] = useState([]);
-  const [activity, setActivity] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [tab, setTab] = useState("planned");
+  const [issueModalOpen, setIssueModalOpen] = useState(false);
 
   useEffect(() => {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { router.push("/login"); return; }
-      const { data: profile } = await supabase.from("profiles").select("org_id").eq("id", user.id).single();
+      setUser(user);
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("org_id")
+        .eq("id", user.id)
+        .single();
       setOrgId(profile?.org_id || null);
     })();
   }, [router]);
 
   useEffect(() => {
-    if (!orgId) return;
-    (async () => {
-      setLoading(true);
-      const [
-        { data: partsData, error: partsErr },
-        { data: jobsData, error: jobsErr },
-        { data: posData, error: posErr },
-        { data: fleetData, error: fleetErr },
-        { data: activityData, error: actErr },
-      ] = await Promise.all([
-        supabase.from("parts").select("*").eq("org_id", orgId),
-        supabase.from("jobs").select("*, job_line_items(*)").eq("org_id", orgId).order("job_date", { ascending: false }),
-        supabase.from("purchase_orders").select("*").eq("org_id", orgId),
-        supabase.from("fleet").select("*").eq("org_id", orgId),
-        supabase.from("activity_log").select("*").eq("org_id", orgId).order("created_at", { ascending: false }).limit(6),
-      ]);
-      setError(partsErr?.message || jobsErr?.message || posErr?.message || fleetErr?.message || actErr?.message || "");
-      setParts(partsData || []);
-      setJobs(jobsData || []);
-      setPos(posData || []);
-      setFleet(fleetData || []);
-      setActivity(activityData || []);
-      setLoading(false);
-    })();
-  }, [orgId]);
+    if (!orgId || !jobId) return;
+    fetchJob();
+  }, [orgId, jobId]);
 
-  const lowStock = parts.filter((p) => p.qty <= p.min_reorder);
-  const totalPartsValue = parts.reduce((s, p) => s + p.qty * p.unit_cost, 0);
-  const openPOs = pos.filter((p) => p.status === "Ordered").length;
-  const jobsSalesTotal = jobs.reduce((s, j) => s + (j.job_line_items || []).reduce((a, li) => a + li.qty * li.sale_cost, 0), 0);
-  const jobsCostTotal = jobs.reduce((s, j) => s + (j.job_line_items || []).reduce((a, li) => a + li.qty * li.part_cost, 0), 0);
+  const fetchJob = async () => {
+    setLoading(true);
+    setError("");
 
-  if (!orgId) {
-    return <div className="min-h-screen bg-slate-950 flex items-center justify-center"><div className="f-mono text-xs text-slate-500 uppercase tracking-widest">Loading...</div></div>;
+    const [
+      { data: jobData, error: jobErr },
+      { data: poData, error: poErr },
+      { data: issuedData, error: issuedErr },
+      { data: partsData },
+    ] = await Promise.all([
+      supabase
+        .from("jobs")
+        .select("*, job_line_items(*, parts(part_no, sku, description)), locations(name, type)")
+        .eq("id", jobId)
+        .eq("org_id", orgId)
+        .single(),
+      supabase
+        .from("purchase_orders")
+        .select("*, po_line_items(*, parts(part_no, sku))")
+        .eq("job_id", jobId)
+        .eq("org_id", orgId)
+        .order("po_date", { ascending: false }),
+      supabase
+        .from("job_issued_materials")
+        .select("*, parts(part_no, sku)")
+        .eq("job_id", jobId)
+        .order("created_at", { ascending: false }),
+      supabase.from("parts").select("id, part_no, sku, unit_cost").eq("org_id", orgId).order("part_no"),
+    ]);
+
+    if (jobErr) setError(jobErr.message);
+    if (poErr) setError((prev) => prev || poErr.message);
+    if (issuedErr) setError((prev) => prev || issuedErr.message);
+
+    setJob(jobData || null);
+    setPurchases(poData || []);
+    setIssuedMaterials(issuedData || []);
+    setParts(partsData || []);
+    setLoading(false);
+  };
+
+  const logActivity = async (message) => {
+    await supabase.from("activity_log").insert({ org_id: orgId, user_id: user.id, message });
+  };
+
+  /*
+   * =========================================================
+   * PURCHASES TAB — REAL DATA
+   * =========================================================
+   *
+   * Flattens purchase_orders + po_line_items (filtered by
+   * job_id) into one row per product ordered against this job.
+   *
+   * NOTE: "Received" is shown as full qty when the PO status
+   * is "Received", otherwise 0. There is no per-line partial
+   * receiving tracked yet -- this is an approximation until
+   * that's built.
+   */
+
+  const purchaseRows = purchases.flatMap((po) =>
+    (po.po_line_items || []).map((li) => ({
+      po_id: po.id,
+      po_no: po.po_no,
+      po_date: po.po_date,
+      vendor: po.vendor,
+      status: po.status,
+      part_no: li.parts?.part_no || "—",
+      sku: li.parts?.sku || "—",
+      qty: li.qty,
+      unit_cost: li.unit_cost,
+      received: po.status === "Received" ? li.qty : 0,
+    }))
+  );
+
+  if (loading || !job) {
+    return (
+      <Nav title="Job Detail">
+        <div className="p-6 text-sm text-slate-500 f-mono uppercase tracking-widest">
+          {error || "Loading..."}
+        </div>
+      </Nav>
+    );
   }
 
-  return (
-    <Nav title="Dashboard">
-      <div className="p-4 md:p-6 space-y-6">
-        {error && <div className="text-sm text-red-400">{error}</div>}
-        {loading ? (
-          <div className="text-sm text-slate-500">Loading dashboard...</div>
-        ) : (
-          <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <StatCard label="Catalog Value" value={money(totalPartsValue)} icon={Package} />
-              <StatCard label="Low Stock" value={lowStock.length} icon={AlertTriangle} accent={lowStock.length > 0 ? "text-red-400" : "text-emerald-400"} />
-              <StatCard label="Open POs" value={openPOs} icon={ShoppingCart} accent="text-sky-400" />
-              <StatCard label="Job Margin" value={money(jobsSalesTotal - jobsCostTotal)} icon={Briefcase} accent="text-emerald-400" />
-            </div>
+  const plannedTotal = (job.job_line_items || []).reduce(
+    (s, li) => s + Number(li.qty || 0) * Number(li.part_cost || 0), 0
+  );
+  const plannedSaleTotal = (job.job_line_items || []).reduce(
+    (s, li) => s + Number(li.qty || 0) * Number(li.sale_cost || 0), 0
+  );
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <Panel title="Recent Jobs" icon={Briefcase} className="lg:col-span-2">
-                <table className="w-full">
-                  <thead><tr><Th>Job No.</Th><Th>Client</Th><Th>Date</Th><Th className="text-right">Sales</Th></tr></thead>
+  // Already-issued qty per part FROM MANUAL ISSUING ONLY (job_issued_materials).
+  // A ServiceM8-synced job_line_items row is a different case entirely: the
+  // sync itself already deducted that line's full qty at insert time (see
+  // process_synced_materials) -- it was never "planned then issued" as two
+  // separate steps, it was deducted immediately. So a synced line's real
+  // "issued" amount is its own qty, not something looked up here.
+  const manuallyIssuedQtyByPart = {};
+  for (const im of issuedMaterials) {
+    manuallyIssuedQtyByPart[im.part_id] = (manuallyIssuedQtyByPart[im.part_id] || 0) + Number(im.qty);
+  }
+  const issuedQtyByPart = manuallyIssuedQtyByPart; // kept name for the modal's outstanding-qty calc below
+
+  const plannedLineIssuedQty = (li) =>
+    li.servicem8_material_uuid ? Number(li.qty) : (manuallyIssuedQtyByPart[li.part_id] || 0);
+
+  return (
+    <Nav title="Job Detail">
+      <div className="p-4 md:p-6">
+        {/* ================= HEADER ================= */}
+        <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => router.push("/jobs")}
+              className="p-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <div className="flex items-center gap-2">
+              <span className="text-lg font-medium text-slate-100">#{job.job_no}</span>
+              <Badge className="border-sky-400/30 text-sky-400">Open</Badge>
+            </div>
+          </div>
+          {job.locations && (
+            <button
+              onClick={() => setIssueModalOpen(true)}
+              className="px-3.5 py-2 text-sm rounded bg-orange-500 text-white hover:bg-orange-400 flex items-center gap-1.5"
+              title="For materials that never went through a ServiceM8 sync — those deduct automatically already"
+            >
+              <Send size={14} /> Issue Extra Materials
+            </button>
+          )}
+        </div>
+
+        {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
+
+        {/* ================= INFO CARDS ================= */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+          <Panel title="Customer & Property" icon={User}>
+            <div className="text-xs text-slate-500">Customer</div>
+            <div className="text-sm text-slate-100 mb-2">{job.client || "NA"}</div>
+            <div className="text-xs text-slate-500">Address</div>
+            <div className="text-sm text-slate-100">{job.address || "NA"}</div>
+          </Panel>
+
+          <Panel title="Job Information" icon={FileText}>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-xs text-slate-500">Start</div>
+                <div className="text-sm text-slate-100">{fmtDate(job.job_date)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">Technician</div>
+                <div className="text-sm text-slate-100">{job.technician || "NA"}</div>
+              </div>
+            </div>
+          </Panel>
+
+          <Panel title="Cost Breakdown" icon={DollarSign}>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-xs text-slate-500">Parts Cost</div>
+                <div className="text-sm text-slate-100">{money(plannedTotal)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">Sales Total</div>
+                <div className="text-sm text-emerald-400">{money(plannedSaleTotal)}</div>
+              </div>
+            </div>
+            <div className="text-[10px] text-slate-600 mt-2">
+              Estimated / Service Cost not tracked yet.
+            </div>
+          </Panel>
+        </div>
+
+        {/* ================= TABS ================= */}
+        <div className="flex gap-4 border-b border-slate-800 mb-4 text-sm overflow-x-auto">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`pb-2 px-1 flex items-center gap-1.5 whitespace-nowrap ${
+                tab === t.key ? "text-orange-400 border-b-2 border-orange-500" : "text-slate-500"
+              }`}
+            >
+              <t.icon size={14} /> {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* ================= PLANNED MATERIALS (REAL) ================= */}
+        {tab === "planned" && (
+          <Panel title="Planned Materials" icon={Package}>
+            {(job.job_line_items || []).length === 0 ? (
+              <div className="text-sm text-slate-500 p-2">No materials planned for this job.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px]">
+                  <thead>
+                    <tr><Th>Product</Th><Th>Code/SKU</Th><Th className="text-right">Qty</Th><Th className="text-right">Part Cost</Th><Th>Source</Th><Th className="text-right">Issued</Th></tr>
+                  </thead>
                   <tbody>
-                    {jobs.slice(0, 5).map((j) => (
-                      <tr key={j.id} className="border-t border-slate-800/70">
-                        <Td className="f-mono text-orange-400">{j.job_no}</Td>
-                        <Td>{j.client}</Td>
-                        <Td className="text-slate-400">{fmtDate(j.job_date)}</Td>
-                        <Td className="text-right f-mono text-emerald-400">
-                          {money((j.job_line_items || []).reduce((a, li) => a + li.qty * li.sale_cost, 0))}
+                    {job.job_line_items.map((li) => (
+                      <tr key={li.id} className="border-t border-slate-800/70">
+                        <Td>{li.parts?.part_no || "—"}</Td>
+                        <Td className="f-mono text-xs text-slate-400">{li.parts?.sku || "—"}</Td>
+                        <Td className="text-right f-mono">{li.qty}</Td>
+                        <Td className="text-right f-mono">{money(li.part_cost)}</Td>
+                        <Td>
+                          {li.servicem8_material_uuid ? (
+                            <span className="text-[10px] f-mono uppercase text-sky-400 border border-sky-400/30 rounded px-1.5 py-0.5">ServiceM8 Sync</span>
+                          ) : (
+                            <span className="text-[10px] f-mono uppercase text-slate-500 border border-slate-700 rounded px-1.5 py-0.5">Manual</span>
+                          )}
                         </Td>
+                        <Td className="text-right f-mono text-emerald-400">{plannedLineIssuedQty(li)}</Td>
                       </tr>
                     ))}
-                    {jobs.length === 0 && <tr><Td colSpan={4} className="text-slate-500">No jobs logged yet.</Td></tr>}
                   </tbody>
                 </table>
-              </Panel>
+              </div>
+            )}
+          </Panel>
+        )}
 
-              <Panel title="Reorder Alerts" icon={AlertTriangle}>
-                <div className="space-y-2">
-                  {lowStock.length === 0 && <div className="text-sm text-slate-500">All parts above minimum. Nice.</div>}
-                  {lowStock.map((p) => (
-                    <div key={p.id} className="flex items-center justify-between bg-red-500/5 border border-red-500/20 rounded px-3 py-2">
-                      <div>
-                        <div className="f-mono text-sm text-slate-200">{p.part_no}</div>
-                        <div className="text-[11px] text-slate-500">{p.sku}</div>
-                      </div>
-                      <div className="text-right">
-                        <div className="f-mono text-sm text-red-400">{p.qty}/{p.min_reorder}</div>
-                        <TradeBadge category={p.category} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Panel>
-            </div>
+        {/* ================= ISSUED MATERIALS (REAL) ================= */}
+        {tab === "issued" && (
+          <Panel title="Issued Materials" icon={FileText}>
+            {issuedMaterials.length === 0 ? (
+              <div className="text-sm text-slate-500 p-2">
+                Nothing manually issued to this job yet. Materials synced from ServiceM8 are
+                deducted automatically and show on the Planned Materials tab instead — use
+                "Issue Extra Materials" above only for things that never went through ServiceM8.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[600px]">
+                  <thead>
+                    <tr><Th>Product</Th><Th>Code/SKU</Th><Th className="text-right">Qty</Th><Th className="text-right">Unit Cost</Th><Th className="text-right">Total</Th><Th>Issued</Th></tr>
+                  </thead>
+                  <tbody>
+                    {issuedMaterials.map((im) => (
+                      <tr key={im.id} className="border-t border-slate-800/70">
+                        <Td>{im.parts?.part_no || "—"}</Td>
+                        <Td className="f-mono text-xs text-slate-400">{im.parts?.sku || "—"}</Td>
+                        <Td className="text-right f-mono text-emerald-400">{im.qty}</Td>
+                        <Td className="text-right f-mono">{money(im.unit_cost)}</Td>
+                        <Td className="text-right f-mono">{money(Number(im.qty) * Number(im.unit_cost))}</Td>
+                        <Td className="text-slate-400 text-xs">{fmtDateTime(im.created_at)}</Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <Panel title="Fleet Snapshot" icon={Truck}>
-                <div className="grid grid-cols-2 gap-3">
-                  {fleet.map((t) => (
-                    <div key={t.id} className="border border-slate-800 rounded px-3 py-2.5">
-                      <div className="flex items-center justify-between">
-                        <span className="f-mono text-sm text-slate-200">{t.truck_number}</span>
-                        <Badge className={t.status === "Active" ? "border-emerald-400/30 text-emerald-400" : "border-slate-600 text-slate-400"}>{t.status}</Badge>
-                      </div>
-                      <div className="text-xs text-slate-400 mt-1">{t.nickname} · {t.driver || "Unassigned"}</div>
-                    </div>
-                  ))}
-                  {fleet.length === 0 && <div className="text-sm text-slate-500 col-span-2">No trucks added yet.</div>}
-                </div>
-              </Panel>
-              <Panel title="Latest Activity" icon={History}>
-                <div className="space-y-2.5 max-h-52 overflow-y-auto pr-1">
-                  {activity.map((a) => (
-                    <div key={a.id} className="text-sm text-slate-400 border-l-2 border-slate-800 pl-3">
-                      <span className="text-slate-200">{a.message}</span>
-                      <div className="text-[11px] f-mono text-slate-600 mt-0.5">{fmtDateTime(a.created_at)}</div>
-                    </div>
-                  ))}
-                  {activity.length === 0 && <div className="text-sm text-slate-500">No activity yet.</div>}
-                </div>
-              </Panel>
+        {/* ================= PURCHASES (REAL) ================= */}
+        {tab === "purchases" && (
+          <Panel title="Purchases" icon={Truck}>
+            {purchaseRows.length === 0 ? (
+              <div className="text-sm text-slate-500 p-2">No purchase orders linked to this job yet.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[800px]">
+                  <thead>
+                    <tr>
+                      <Th>PO No.</Th><Th>Date</Th><Th>Vendor</Th><Th>Product</Th><Th>Code/SKU</Th>
+                      <Th className="text-right">Qty</Th><Th className="text-right">Price</Th>
+                      <Th className="text-right">Received</Th><Th>Status</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purchaseRows.map((row, i) => (
+                      <tr key={`${row.po_id}-${i}`} className="border-t border-slate-800/70">
+                        <Td className="f-mono text-orange-400">{row.po_no}</Td>
+                        <Td className="text-slate-400">{fmtDate(row.po_date)}</Td>
+                        <Td>{row.vendor}</Td>
+                        <Td>{row.part_no}</Td>
+                        <Td className="f-mono text-xs text-slate-400">{row.sku}</Td>
+                        <Td className="text-right f-mono">{row.qty}</Td>
+                        <Td className="text-right f-mono">{money(row.unit_cost)}</Td>
+                        <Td className="text-right f-mono text-emerald-400">{row.received}</Td>
+                        <Td><Badge className={STATUS_STYLES[row.status] || STATUS_STYLES.Open}>{row.status}</Badge></Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        )}
+
+        {/* ================= PLACEHOLDER TABS ================= */}
+        {tab === "returned" && (
+          <Panel title="Returned Materials" icon={RotateCcw}>
+            <div className="text-sm text-slate-500 p-2">
+              Not built yet — this will track materials returned from this job back
+              to stock, in a future session.
             </div>
-          </>
+          </Panel>
+        )}
+
+        {tab === "history" && (
+          <Panel title="Job History" icon={History}>
+            <div className="text-sm text-slate-500 p-2">
+              Not built yet — this will show a timeline of changes to this job, in a
+              future session.
+            </div>
+          </Panel>
         )}
       </div>
+
+      {issueModalOpen && (
+        <IssueMaterialsModal
+          job={job}
+          parts={parts}
+          issuedQtyByPart={issuedQtyByPart}
+          onClose={() => setIssueModalOpen(false)}
+          onIssued={() => { setIssueModalOpen(false); fetchJob(); }}
+          logActivity={logActivity}
+        />
+      )}
     </Nav>
+  );
+}
+
+/*
+ * =============================================================
+ * ISSUE MATERIALS MODAL
+ * =============================================================
+ *
+ * Two sources for rows to issue: this job's Planned Materials
+ * (defaults qty to what's still outstanding: planned - already
+ * issued), or the full parts catalog for anything issued that
+ * wasn't originally planned. Submits the whole batch to
+ * issue_job_materials, which deducts real inventory at the job's
+ * location in one transaction.
+ */
+
+function IssueMaterialsModal({ job, parts, issuedQtyByPart, onClose, onIssued, logActivity }) {
+  // Only lines NOT synced from ServiceM8 can have "outstanding" qty to
+  // issue -- a synced line was already deducted in full at sync time
+  // (see process_synced_materials), so it's never something to issue
+  // manually. This modal is specifically for materials that never went
+  // through ServiceM8 at all.
+  const plannedRows = (job.job_line_items || [])
+    .filter((li) => !li.servicem8_material_uuid)
+    .map((li) => ({
+      part_id: li.part_id,
+      part_no: li.parts?.part_no,
+      sku: li.parts?.sku,
+      planned: Number(li.qty),
+      outstanding: Math.max(Number(li.qty) - (issuedQtyByPart[li.part_id] || 0), 0),
+      unit_cost: li.part_cost,
+    }));
+
+  const [source, setSource] = useState("planned"); // 'planned' | 'catalog'
+  const [rows, setRows] = useState(
+    plannedRows
+      .filter((r) => r.outstanding > 0)
+      .map((r) => ({ part_id: r.part_id, qty: r.outstanding, unit_cost: r.unit_cost }))
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const partById = (id) => parts.find((p) => p.id === id);
+
+  const updateQty = (partId, qty) => {
+    setRows(rows.map((r) => (r.part_id === partId ? { ...r, qty: Number(qty) } : r)));
+  };
+  const removeRow = (partId) => setRows(rows.filter((r) => r.part_id !== partId));
+  const addCatalogRow = (partId) => {
+    if (!partId || rows.some((r) => r.part_id === partId)) return;
+    const p = partById(partId);
+    setRows([...rows, { part_id: partId, qty: 1, unit_cost: p?.unit_cost || 0 }]);
+  };
+
+  const submit = async () => {
+    const items = rows.filter((r) => r.qty > 0);
+    if (items.length === 0) {
+      setError("Add at least one item with a quantity to issue.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const { error: rpcErr } = await supabase.rpc("issue_job_materials", {
+        p_job_id: job.id,
+        p_items: items,
+      });
+      if (rpcErr) throw rpcErr;
+      await logActivity(`Issued ${items.length} material(s) to job ${job.job_no}`);
+      onIssued();
+    } catch (e) {
+      setError(e.message || "Could not issue materials — check that there's enough stock at this job's location.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <ModalShell title={`Issue Extra Materials — #${job.job_no}`} icon={Send} onClose={onClose} wide>
+      <div className="text-xs text-slate-500 mb-3">
+        For materials that never went through a ServiceM8 sync — those already deducted
+        stock automatically. Deducts real inventory at{" "}
+        <span className="text-slate-300">{job.locations?.name || "this job's location"}</span>.
+      </div>
+
+      {error && <div className="text-sm text-red-400 mb-3 border border-red-900/50 bg-red-950/20 rounded px-3 py-2">{error}</div>}
+
+      <div className="flex gap-4 border-b border-slate-800 mb-3 text-sm">
+        <button onClick={() => setSource("planned")} className={`pb-2 px-1 ${source === "planned" ? "text-orange-400 border-b-2 border-orange-500" : "text-slate-500"}`}>
+          From Planned
+        </button>
+        <button onClick={() => setSource("catalog")} className={`pb-2 px-1 ${source === "catalog" ? "text-orange-400 border-b-2 border-orange-500" : "text-slate-500"}`}>
+          Add Other Product
+        </button>
+      </div>
+
+      {source === "catalog" && (
+        <div className="mb-3">
+          <PartPicker parts={parts} value="" onChange={addCatalogRow} placeholder="Search to add a product..." />
+        </div>
+      )}
+
+      <div className="border border-slate-800 rounded">
+        <div className="grid grid-cols-[2fr_0.8fr_1fr_auto] gap-2 px-3 py-2 border-b border-slate-800 text-[11px] f-mono uppercase text-slate-500">
+          <span>Product</span><span className="text-right">Qty to Issue</span><span className="text-right">Unit Cost</span><span></span>
+        </div>
+        {rows.length === 0 ? (
+          <div className="p-4 text-sm text-slate-500">
+            {source === "planned" ? "Everything planned has already been fully issued." : "No items added yet."}
+          </div>
+        ) : (
+          rows.map((r) => {
+            const part = partById(r.part_id);
+            return (
+              <div key={r.part_id} className="grid grid-cols-[2fr_0.8fr_1fr_auto] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0">
+                <div>
+                  <div className="text-sm text-slate-100">{part?.part_no || "—"}</div>
+                  <div className="text-xs f-mono text-slate-500">{part?.sku}</div>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  className={inputCls}
+                  value={r.qty}
+                  onChange={(e) => updateQty(r.part_id, e.target.value)}
+                />
+                <div className="text-right f-mono text-sm text-slate-400">{money(r.unit_cost)}</div>
+                <IconBtn danger onClick={() => removeRow(r.part_id)}><FileText size={13} /></IconBtn>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="flex justify-end gap-2 mt-4">
+        <button onClick={onClose} className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800">Cancel</button>
+        <PrimaryBtn onClick={submit} className={saving ? "opacity-60 pointer-events-none" : ""}>
+          <Check size={15} /> {saving ? "Issuing..." : "Issue Materials"}
+        </PrimaryBtn>
+      </div>
+    </ModalShell>
   );
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
 import {
   getValidAccessToken,
   fetchJobs,
@@ -32,11 +33,16 @@ function isNonInventoryCharge(name) {
 
   // Hours / hr / hrs
   if (/\bhours?\b/i.test(value)) return true;
-  if (/\b(?:\d+(?:\.\d+)?\s*)?hrs?\b/i.test(value)) return true;
-  if (/\bafter\s+hours?\b/i.test(value)) return true;
+  if (/\b(?:\d+(?:\.\d+)?\s*)?hrs?\b/i.test(value)) {
+    return true;
+  }
 
   // Technician / apprentice labor
-  if (/\btechnician\b.*\b(?:apprentice|hours?|hrs?|hr)\b/i.test(value)) {
+  if (
+    /\btechnician\b.*\b(?:apprentice|hours?|hrs?|hr)\b/i.test(
+      value
+    )
+  ) {
     return true;
   }
 
@@ -46,14 +52,20 @@ function isNonInventoryCharge(name) {
   if (/\bservice\s+rate\b/i.test(value)) return true;
   if (/\bservice\s+charge\b/i.test(value)) return true;
   if (/\btruck\s+charge\b/i.test(value)) return true;
-  if (/\bcall\s*-?\s*out\s+(?:fee|charge|rate)\b/i.test(value)) {
+
+  if (
+    /\bcall\s*-?\s*out\s+(?:fee|charge|rate)\b/i.test(value)
+  ) {
     return true;
   }
-  if (/\btravel\s+(?:fee|charge)\b/i.test(value)) return true;
+
+  if (/\btravel\s+(?:fee|charge)\b/i.test(value)) {
+    return true;
+  }
 
   // Warranty / callback service
   if (
-    /\b(?:after[- ]installation|post[- ]installation)\b.*\bcallback\b/i.test(
+    /\b(?:after\s*installation|post[- ]installation)\b.*\bcallback\b/i.test(
       value
     )
   ) {
@@ -62,7 +74,9 @@ function isNonInventoryCharge(name) {
 
   if (
     /\bwarranty\b/i.test(value) &&
-    /\b(?:service|callback|labor|labour|charge|fee)\b/i.test(value)
+    /\b(?:service|callback|labor|labour|charge|fee)\b/i.test(
+      value
+    )
   ) {
     return true;
   }
@@ -84,9 +98,8 @@ function normalizeKey(value) {
 // BUILD SERVICE M8 MATERIAL CATALOG LOOKUP
 // ------------------------------------------------------------
 //
-// ServiceM8 jobmaterial.json gives us material_uuid.
-// The actual material code such as TYWRAP8MOUNTBLK is in
-// material.json as item_number.
+// ServiceM8 jobmaterial gives us material_uuid.
+// ServiceM8 material.json gives us item_number.
 //
 // UUID -> catalog material
 // ------------------------------------------------------------
@@ -110,7 +123,9 @@ function buildCatalogByUuid(catalog) {
 // ------------------------------------------------------------
 
 function resolveCatalogMaterial(jobMaterial, catalogByUuid) {
-  const materialUuid = normalizeKey(jobMaterial?.material_uuid);
+  const materialUuid = normalizeKey(
+    jobMaterial?.material_uuid
+  );
 
   const catalogItem = materialUuid
     ? catalogByUuid[materialUuid]
@@ -179,9 +194,9 @@ export async function POST(request) {
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // AUTHENTICATE USER
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const { data: userData, error: userErr } =
     await admin.auth.getUser(access_token);
@@ -193,9 +208,9 @@ export async function POST(request) {
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // GET ORGANIZATION
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const { data: profile } = await admin
     .from("profiles")
@@ -212,9 +227,9 @@ export async function POST(request) {
 
   const orgId = profile.org_id;
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // GET SERVICEM8 INTEGRATION
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const { data: integration } = await admin
     .from("integrations")
@@ -244,9 +259,9 @@ export async function POST(request) {
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // MAIN WAREHOUSE
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const { data: mainLoc } = await admin
     .from("locations")
@@ -265,9 +280,9 @@ export async function POST(request) {
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // FETCH RECENT SERVICEM8 JOBS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const cutoff = new Date();
 
@@ -284,20 +299,15 @@ export async function POST(request) {
   let sm8Catalog;
 
   try {
-    // IMPORTANT:
-    // The catalog is fetched account-wide once.
-    //
-    // jobmaterial.json gives us material_uuid.
-    // material.json gives us item_number.
-    //
-    // We need both to correctly identify actual issued parts.
+    const results = await Promise.all([
+      fetchJobs(sm8Token, cutoffStr),
+      fetchCompanies(sm8Token),
+      fetchMaterialsCatalog(sm8Token),
+    ]);
 
-    [sm8Jobs, sm8Companies, sm8Catalog] =
-      await Promise.all([
-        fetchJobs(sm8Token, cutoffStr),
-        fetchCompanies(sm8Token),
-        fetchMaterialsCatalog(sm8Token),
-      ]);
+    sm8Jobs = results[0];
+    sm8Companies = results[1];
+    sm8Catalog = results[2];
   } catch (e) {
     console.error(
       "[sm8 sync] initial ServiceM8 fetch failed:",
@@ -322,26 +332,28 @@ export async function POST(request) {
     } catalog materials — ${elapsed()}`
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // SERVICE M8 MATERIAL CATALOG LOOKUP
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const catalogByUuid =
     buildCatalogByUuid(sm8Catalog);
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // COMPANY LOOKUP
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const companyName = {};
 
   for (const c of sm8Companies || []) {
-    companyName[c.uuid] = c.name;
+    if (c?.uuid) {
+      companyName[c.uuid] = c.name;
+    }
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // FILTER RELEVANT JOBS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const relevantJobs = (sm8Jobs || []).filter((j) => {
     if (
@@ -383,18 +395,24 @@ export async function POST(request) {
   );
 
   console.log(
-    `[sm8 sync] ${relevantJobs.length} relevant jobs after filtering — ${elapsed()}`
+    `[sm8 sync] ${
+      relevantJobs.length
+    } relevant jobs after filtering — ${elapsed()}`
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // LOAD EXISTING JOBS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const { data: existingJobs } = await admin
     .from("jobs")
     .select("id, servicem8_job_uuid")
     .eq("org_id", orgId)
-    .not("servicem8_job_uuid", "is", null);
+    .not(
+      "servicem8_job_uuid",
+      "is",
+      null
+    );
 
   const jobIdByUuid = Object.fromEntries(
     (existingJobs || []).map((j) => [
@@ -407,9 +425,9 @@ export async function POST(request) {
     Object.keys(jobIdByUuid)
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // UPSERT JOBS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   let jobsCreated = 0;
   let jobsUpdated = 0;
@@ -470,12 +488,14 @@ export async function POST(request) {
   }
 
   console.log(
-    `[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`
+    `[sm8 sync] upserted ${
+      relevantJobs.length
+    } jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // CHECKPOINT
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const allJobUuids = relevantJobs
     .map((j) => j.uuid)
@@ -530,9 +550,9 @@ export async function POST(request) {
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // NO JOBS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   if (allJobUuids.length === 0) {
     await admin
@@ -574,9 +594,9 @@ export async function POST(request) {
     });
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // SAVE / UPDATE CHECKPOINT BEFORE MATERIAL FETCH
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   if (!syncState || !sameJobSet) {
     nextIndex = 0;
@@ -606,27 +626,32 @@ export async function POST(request) {
     }
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // DETERMINE BATCH
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const batchStart = nextIndex;
 
-  const batchJobUuids = allJobUuids.slice(
-    batchStart,
-    batchStart + JOB_BATCH_SIZE
-  );
+  const batchJobUuids =
+    allJobUuids.slice(
+      batchStart,
+      batchStart + JOB_BATCH_SIZE
+    );
 
   const batchEnd =
     batchStart + batchJobUuids.length;
 
   console.log(
-    `[sm8 sync] processing jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length} — ${elapsed()}`
+    `[sm8 sync] processing jobs ${
+      batchStart + 1
+    }-${batchEnd} of ${
+      allJobUuids.length
+    } — ${elapsed()}`
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // FETCH MATERIALS FOR THIS BATCH
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   let sm8Materials = [];
 
@@ -638,7 +663,9 @@ export async function POST(request) {
       );
   } catch (e) {
     console.error(
-      `[sm8 sync] material fetch failed for jobs ${batchStart + 1}-${batchEnd}:`,
+      `[sm8 sync] material fetch failed for jobs ${
+        batchStart + 1
+      }-${batchEnd}:`,
       e
     );
 
@@ -662,20 +689,26 @@ export async function POST(request) {
   }
 
   console.log(
-    `[sm8 sync] fetched ${sm8Materials.length} material lines across ${batchJobUuids.length} jobs — ${elapsed()}`
+    `[sm8 sync] fetched ${
+      sm8Materials.length
+    } material lines across ${
+      batchJobUuids.length
+    } jobs — ${elapsed()}`
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // LOAD SDR PARTS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
-  const { data: parts, error: partsErr } =
-    await admin
-      .from("parts")
-      .select(
-        "id, sku, part_no, unit_cost"
-      )
-      .eq("org_id", orgId);
+  const {
+    data: parts,
+    error: partsErr,
+  } = await admin
+    .from("parts")
+    .select(
+      "id, sku, part_no, unit_cost"
+    )
+    .eq("org_id", orgId);
 
   if (partsErr) {
     return NextResponse.json(
@@ -686,6 +719,25 @@ export async function POST(request) {
       { status: 500 }
     );
   }
+
+  // ----------------------------------------------------------
+  // EXACT PART LOOKUP ONLY
+  // ----------------------------------------------------------
+  //
+  // IMPORTANT:
+  //
+  // ServiceM8 item_number must EXACTLY match:
+  //
+  //     SDR parts.sku
+  // OR
+  //     SDR parts.part_no
+  //
+  // We intentionally DO NOT match the ServiceM8 material
+  // description/name.
+  //
+  // This prevents a descriptive name from accidentally
+  // selecting the wrong inventory part.
+  // ----------------------------------------------------------
 
   const partByKey = {};
 
@@ -703,9 +755,9 @@ export async function POST(request) {
     }
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // LOAD ALREADY PROCESSED MATERIALS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const {
     data: alreadySyncedLines,
@@ -740,26 +792,9 @@ export async function POST(request) {
     )
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // LOAD FLAGGED MATERIALS
-  // ------------------------------------------------------------
-  //
-  // We DO NOT permanently skip a flagged UUID if it now
-  // matches an SDR part.
-  //
-  // This is important:
-  //
-  // Stock = 0 today
-  //       ↓
-  // flagged insufficient_stock
-  //       ↓
-  // stock is replenished tomorrow
-  //       ↓
-  // next ServiceM8 sync can attempt deduction again
-  //
-  // But an unmatched item with no SDR part remains skipped
-  // so we don't create endless duplicate "no_match" rows.
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const {
     data: alreadyFlagged,
@@ -795,25 +830,31 @@ export async function POST(request) {
     }
   }
 
-  // ------------------------------------------------------------
-  // BUILD MATERIAL PAYLOAD
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
+  // COUNTERS
+  // ----------------------------------------------------------
 
   let materialsDeducted = 0;
   let materialsFlagged = 0;
+
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
   let materialsSkippedNonInventory = 0;
   let materialsSkippedAlreadyProcessed = 0;
+  let materialsSkippedAlreadyFlagged = 0;
+
   let materialsCatalogResolved = 0;
   let materialsCatalogMissing = 0;
+
+  let materialsExactMatched = 0;
+  let materialsNoExactMatch = 0;
 
   const totalMaterialsSeen =
     sm8Materials.length;
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // PROCESS EACH SERVICE M8 MATERIAL
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const materialPayload = [];
 
@@ -837,9 +878,9 @@ export async function POST(request) {
       continue;
     }
 
-    // ----------------------------------------------------------
-    // RESOLVE THE REAL SERVICE M8 CATALOG ITEM
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // RESOLVE SERVICE M8 CATALOG ITEM
+    // --------------------------------------------------------
 
     const resolved =
       resolveCatalogMaterial(
@@ -856,25 +897,22 @@ export async function POST(request) {
     const jobMaterialName =
       resolved.jobMaterialName;
 
+    const catalogMaterialUuid =
+      resolved.materialUuid;
+
     if (itemNumber) {
       materialsCatalogResolved++;
     } else {
       materialsCatalogMissing++;
     }
 
-    // Use catalog name first when available for labor detection.
-    const inventoryDisplayName =
-      catalogName ||
-      jobMaterialName ||
-      itemNumber;
-
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // LABOR / SERVICE CHARGE
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     if (
       isNonInventoryCharge(
-        inventoryDisplayName
+        catalogName
       ) ||
       isNonInventoryCharge(
         jobMaterialName
@@ -884,112 +922,141 @@ export async function POST(request) {
 
       console.log(
         `[sm8 sync] skipping non-inventory charge: ${
-          inventoryDisplayName || "(unnamed)"
+          catalogName ||
+          jobMaterialName ||
+          "(unnamed)"
         }`
       );
 
       continue;
     }
 
-    // ----------------------------------------------------------
-    // MATCH SDR PART
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // EXACT MATCH ONLY
+    // --------------------------------------------------------
     //
-    // PRIMARY:
+    // PRIMARY AND ONLY INVENTORY MATCH:
+    //
     // ServiceM8 catalog item_number
-    //
-    // FALLBACK:
-    // ServiceM8 job material name
-    //
-    // This means:
-    //
-    // TYWRAP8MOUNTBLK
     //       ↓
-    // ServiceM8 item_number
-    //       ↓
-    // SDR SKU / part_no
+    // SDR SKU
+    //       OR
+    // SDR part_no
     //
-    // ----------------------------------------------------------
+    // DO NOT use jobMaterialName as a fallback.
+    // --------------------------------------------------------
 
     const itemKey =
       normalizeKey(itemNumber);
 
-    const nameKey =
-      normalizeKey(jobMaterialName);
-
     const match =
-      (itemKey
-        ? partByKey[itemKey]
-        : null) ||
-      (nameKey
-        ? partByKey[nameKey]
-        : null);
+      itemKey
+        ? partByKey[itemKey] || null
+        : null;
 
     const materialUuid =
-      m.uuid ||
+      catalogMaterialUuid ||
       m.material_uuid ||
       "";
 
     const materialUuidKey =
       normalizeKey(materialUuid);
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // DIAGNOSTIC LOGGING
+    // --------------------------------------------------------
+
+    console.log(
+      `[sm8 sync] material inspection: ` +
+        `job=${jobId} ` +
+        `catalog_uuid=${materialUuid || "(none)"} ` +
+        `item_number=${itemNumber || "(none)"} ` +
+        `catalog_name=${catalogName || "(none)"} ` +
+        `job_material_name=${jobMaterialName || "(none)"} ` +
+        `matched_part=${match?.part_no || match?.sku || "(NO EXACT MATCH)"} ` +
+        `qty=${qty}`
+    );
+
+    // --------------------------------------------------------
     // ALREADY PROCESSED
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     if (
       materialUuidKey &&
-      syncedUuids.has(materialUuidKey)
+      syncedUuids.has(
+        materialUuidKey
+      )
     ) {
       materialsSkippedAlreadyProcessed++;
       continue;
     }
 
-    // ----------------------------------------------------------
-    // ALREADY FLAGGED WITHOUT A MATCH
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // NO EXACT MATCH
+    // --------------------------------------------------------
     //
-    // If there is still no SDR match, don't keep inserting the
-    // exact same unmatched material on every sync.
+    // IMPORTANT:
     //
-    // If there IS now a match, however, we allow it through again.
-    // This lets a previously unresolved material become inventory
-    // automatically after the catalog/part is corrected.
-    // ----------------------------------------------------------
+    // If ServiceM8 item_number does not exactly match an SDR
+    // SKU or part_no:
+    //
+    //     DO NOT DEDUCT INVENTORY.
+    //
+    // The material is allowed through with part_id = null so
+    // process_synced_materials can flag it according to the
+    // existing database function.
+    // --------------------------------------------------------
 
-    if (
-      !match &&
-      materialUuidKey &&
-      flaggedByUuid.has(materialUuidKey)
-    ) {
-      continue;
+    if (!match) {
+      materialsNoExactMatch++;
+
+      if (
+        materialUuidKey &&
+        flaggedByUuid.has(
+          materialUuidKey
+        )
+      ) {
+        materialsSkippedAlreadyFlagged++;
+
+        console.log(
+          `[sm8 sync] unmatched material already flagged: ` +
+            `item_number=${itemNumber || "(none)"} ` +
+            `uuid=${materialUuid}`
+        );
+
+        continue;
+      }
+
+      materialsFlagged++;
+
+      console.warn(
+        `[sm8 sync] NO EXACT PART MATCH — will NOT deduct inventory: ` +
+          `item_number=${itemNumber || "(none)"} ` +
+          `catalog_name=${catalogName || "(none)"} ` +
+          `job_material_name=${jobMaterialName || "(none)"} ` +
+          `uuid=${materialUuid}`
+      );
+    } else {
+      materialsExactMatched++;
     }
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // BUILD PAYLOAD
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     materialPayload.push({
       job_id: jobId,
 
-      // This is the actual SDR part matched from:
-      // ServiceM8 material.item_number -> SDR SKU/part_no
+      // Exact SDR part only.
+      //
+      // If there is no exact match, NULL is intentional.
+      // This prevents incorrect inventory deductions.
       part_id: match
         ? match.id
         : null,
 
-      // Keep the ServiceM8 job-material UUID.
       servicem8_material_uuid:
         materialUuid,
-
-      // IMPORTANT:
-      // Show the actual catalog item number whenever available.
-      // This makes TYWRAP8MOUNTBLK the actual issued material
-      // instead of only the human-readable ServiceM8 name.
-      raw_name:
-        itemNumber ||
-        jobMaterialName ||
-        "(unnamed)",
 
       qty,
 
@@ -1000,7 +1067,9 @@ export async function POST(request) {
             0
         ) ||
         (match
-          ? Number(match.unit_cost || 0)
+          ? Number(
+              match.unit_cost || 0
+            )
           : 0),
 
       sale_cost:
@@ -1012,13 +1081,18 @@ export async function POST(request) {
     });
 
     console.log(
-      `[sm8 sync] material candidate: job=${jobId} uuid=${materialUuid} item_number=${itemNumber || "(none)"} name=${jobMaterialName || "(none)"} matched_part=${match?.part_no || match?.sku || "(NO MATCH)"} qty=${qty}`
+      `[sm8 sync] material candidate: ` +
+        `job=${jobId} ` +
+        `uuid=${materialUuid || "(none)"} ` +
+        `item_number=${itemNumber || "(none)"} ` +
+        `matched_part=${match?.part_no || match?.sku || "(NO EXACT MATCH)"} ` +
+        `qty=${qty}`
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // PROCESS MATERIALS
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   if (materialPayload.length > 0) {
     const {
@@ -1039,7 +1113,9 @@ export async function POST(request) {
 
     if (processErr) {
       console.error(
-        `[sm8 sync] material processing failed for jobs ${batchStart + 1}-${batchEnd}:`,
+        `[sm8 sync] material processing failed for jobs ${
+          batchStart + 1
+        }-${batchEnd}:`,
         processErr
       );
 
@@ -1068,19 +1144,36 @@ export async function POST(request) {
         result?.deducted_count || 0
       );
 
-    materialsFlagged =
+    // The RPC's flagged_count remains authoritative
+    // for database-level flagging.
+    const rpcFlaggedCount =
       Number(
         result?.flagged_count || 0
       );
+
+    if (rpcFlaggedCount > 0) {
+      materialsFlagged =
+        Math.max(
+          materialsFlagged,
+          rpcFlaggedCount
+        );
+    }
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory charges skipped) — ${elapsed()}`
+    `[sm8 sync] processed ${
+      materialPayload.length
+    } material lines ` +
+      `(${materialsDeducted} deducted, ` +
+      `${materialsFlagged} flagged, ` +
+      `${materialsSkippedNonInventory} non-inventory charges skipped, ` +
+      `${materialsNoExactMatch} no-exact-match materials) — ` +
+      `${elapsed()}`
   );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // ADVANCE CHECKPOINT
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   const syncComplete =
     batchEnd >=
@@ -1131,14 +1224,43 @@ export async function POST(request) {
           jobsProcessedThisRun:
             batchJobUuids.length,
         },
+        diagnostics: {
+          totalMaterialsSeen,
+
+          materialsSkippedNoJob,
+          materialsSkippedNoQty,
+          materialsSkippedNonInventory,
+          materialsSkippedAlreadyProcessed,
+          materialsSkippedAlreadyFlagged,
+
+          materialsCatalogResolved,
+          materialsCatalogMissing,
+
+          materialsExactMatched,
+          materialsNoExactMatch,
+
+          materialPayloadCount:
+            materialPayload.length,
+
+          serviceM8CatalogCount:
+            sm8Catalog?.length ?? 0,
+
+          batchSize:
+            JOB_BATCH_SIZE,
+
+          elapsed: elapsed(),
+
+          sampleRawMaterials:
+            sm8Materials.slice(0, 5),
+        },
       },
       { status: 200 }
     );
   }
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // UPDATE LAST SYNC TIME
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   await admin
     .from("integrations")
@@ -1146,24 +1268,33 @@ export async function POST(request) {
       last_synced_at:
         new Date().toISOString(),
     })
-    .eq("id", integration.id);
+    .eq(
+      "id",
+      integration.id
+    );
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // ACTIVITY LOG
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
-  await admin.from("activity_log").insert({
-    org_id: orgId,
-    user_id:
-      userData.user.id,
-    message: syncComplete
-      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`
-      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`,
-  });
+  await admin
+    .from("activity_log")
+    .insert({
+      org_id: orgId,
+      user_id:
+        userData.user.id,
+      message: syncComplete
+        ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`
+        : `ServiceM8 sync progress: processed jobs ${
+            batchStart + 1
+          }-${batchEnd} of ${
+            allJobUuids.length
+          }; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`,
+    });
 
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
   // RESPONSE
-  // ------------------------------------------------------------
+  // ----------------------------------------------------------
 
   return NextResponse.json({
     ok: true,
@@ -1178,22 +1309,31 @@ export async function POST(request) {
     checkpoint: {
       processedFrom:
         batchStart + 1,
+
       processedTo:
         batchEnd,
+
       nextIndex:
         newNextIndex,
+
       totalJobs:
         allJobUuids.length,
-      remainingJobs: Math.max(
-        0,
-        allJobUuids.length -
-          newNextIndex
-      ),
+
+      remainingJobs:
+        Math.max(
+          0,
+          allJobUuids.length -
+            newNextIndex
+        ),
     },
 
     message: syncComplete
       ? "ServiceM8 sync complete."
-      : `Processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}. Click Sync again to continue.`,
+      : `Processed jobs ${
+          batchStart + 1
+        }-${batchEnd} of ${
+          allJobUuids.length
+        }. Click Sync again to continue.`,
 
     diagnostics: {
       totalMaterialsSeen,
@@ -1202,9 +1342,13 @@ export async function POST(request) {
       materialsSkippedNoQty,
       materialsSkippedNonInventory,
       materialsSkippedAlreadyProcessed,
+      materialsSkippedAlreadyFlagged,
 
       materialsCatalogResolved,
       materialsCatalogMissing,
+
+      materialsExactMatched,
+      materialsNoExactMatch,
 
       materialPayloadCount:
         materialPayload.length,
