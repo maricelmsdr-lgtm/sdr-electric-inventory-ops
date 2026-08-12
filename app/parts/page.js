@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Package, Plus, Pencil, Trash2, MapPin, AlertTriangle, Warehouse, ImagePlus,
@@ -24,7 +24,7 @@ const TABS = [
   { key: "categories", label: "Categories", icon: FolderOpen },
 ];
 
-export default function PartsPage() {
+function PartsPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [user, setUser] = useState(null);
@@ -566,5 +566,17 @@ export default function PartsPage() {
         />
       )}
     </Nav>
+  );
+}
+
+export default function PartsPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="f-mono text-xs text-slate-500 uppercase tracking-widest">Loading...</div>
+      </div>
+    }>
+      <PartsPageInner />
+    </Suspense>
   );
 }
