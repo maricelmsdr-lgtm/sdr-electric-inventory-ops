@@ -18,14 +18,18 @@ const DIR_STYLES = {
   "Return to Warehouse": "border-sky-400/30 text-sky-400",
 };
 
-const emptyLine = (parts) => ({ part_id: parts[0]?.id || "", qty: 1 });
+const emptyLine = () => ({ part_id: "", qty: 1 });
 
 export default function LoadoutsPage() {
   const router = useRouter();
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [loadouts, setLoadouts] = useState([]);
-  const [parts, setParts] = useState([]);
+  // Only the parts referenced by loadouts already on screen — fetched by
+  // exact id, so the log table can't silently miss a part regardless of
+  // catalog size. PartPicker does its own live search independently.
+  const [partsById, setPartsById] = useState({});
+  const [hasAnyParts, setHasAnyParts] = useState(true);
   const [fleet, setFleet] = useState([]);
   const [locations, setLocations] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -50,26 +54,39 @@ export default function LoadoutsPage() {
   const fetchAll = async () => {
     setLoading(true);
     const [
-      { data: partsData, error: partsErr },
       { data: fleetData, error: fleetErr },
       { data: locData, error: locErr },
       { data: loadoutData, error: loErr },
+      { count: partsCount },
     ] = await Promise.all([
-      supabase.from("parts").select("*").eq("org_id", orgId).order("part_no"),
       supabase.from("fleet").select("*").eq("org_id", orgId).order("truck_number"),
       supabase.from("locations").select("*").eq("org_id", orgId).eq("active", true),
       supabase.from("truck_loadouts").select("*, loadout_line_items(*)").eq("org_id", orgId).order("loadout_date", { ascending: false }),
+      supabase.from("parts").select("id", { count: "exact", head: true }).eq("org_id", orgId),
     ]);
-    setError(partsErr?.message || fleetErr?.message || locErr?.message || loErr?.message || "");
-    setParts(partsData || []);
+    setError(fleetErr?.message || locErr?.message || loErr?.message || "");
     setFleet(fleetData || []);
     setLocations(locData || []);
     setLoadouts(loadoutData || []);
+    setHasAnyParts((partsCount || 0) > 0);
+
+    const partIds = [
+      ...new Set(
+        (loadoutData || []).flatMap((l) => (l.loadout_line_items || []).map((li) => li.part_id)).filter(Boolean)
+      ),
+    ];
+    if (partIds.length > 0) {
+      const { data: partsData } = await supabase.from("parts").select("id, part_no, sku").in("id", partIds);
+      setPartsById(Object.fromEntries((partsData || []).map((p) => [p.id, p])));
+    } else {
+      setPartsById({});
+    }
+
     setLoading(false);
   };
 
   const truckById = (id) => fleet.find((t) => t.id === id);
-  const partById = (id) => parts.find((p) => p.id === id);
+  const partById = (id) => partsById[id];
   const locationById = (id) => locations.find((l) => l.id === id);
   const mainWarehouse = () => locations.find((l) => l.type === "WAREHOUSE");
   const locationForTruck = (truckId) => {
@@ -89,7 +106,7 @@ export default function LoadoutsPage() {
 
   const emptyLoadout = () => ({
     loadout_date: todayISO(), truck_id: fleet[0]?.id || "", direction: "Load Out",
-    job_ref: "", technician: "", lineItems: [emptyLine(parts)],
+    job_ref: "", technician: "", lineItems: [emptyLine()],
   });
 
   const openCreate = () => setModal({ mode: "create", data: emptyLoadout() });
@@ -100,7 +117,7 @@ export default function LoadoutsPage() {
       data: {
         id: l.id, loadout_date: l.loadout_date, truck_id: l.truck_id, direction: l.direction,
         job_ref: l.job_ref || "", technician: l.technician || "",
-        lineItems: lineItems.length ? lineItems : [emptyLine(parts)],
+        lineItems: lineItems.length ? lineItems : [emptyLine()],
       },
       originalLineItems: l.loadout_line_items || [],
       originalFrom: l.from_location_id,
@@ -114,8 +131,8 @@ export default function LoadoutsPage() {
 
   const save = async () => {
     const d = modal.data;
-    if (!d.truck_id || d.lineItems.length === 0) {
-      setError("Truck and at least one line item are required.");
+    if (!d.truck_id || d.lineItems.length === 0 || d.lineItems.some((li) => !li.part_id)) {
+      setError("Truck and at least one line item (with a part selected) are required.");
       return;
     }
     const flow = resolveFlow(d.direction, d.truck_id);
@@ -232,9 +249,9 @@ export default function LoadoutsPage() {
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search truck, direction, job ref..." />
-          <PrimaryBtn onClick={openCreate} disabled={parts.length === 0 || fleet.length === 0}><Plus size={15} /> Log Load Out</PrimaryBtn>
+          <PrimaryBtn onClick={openCreate} disabled={!hasAnyParts || fleet.length === 0}><Plus size={15} /> Log Load Out</PrimaryBtn>
         </div>
-        {(parts.length === 0 || fleet.length === 0) && (
+        {(!hasAnyParts || fleet.length === 0) && (
           <div className="text-sm text-amber-400 mb-3">Add at least one part and one truck before logging a load-out.</div>
         )}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
@@ -272,7 +289,7 @@ export default function LoadoutsPage() {
 
       {modal && (
         <LoadoutModal
-          modal={modal} setModal={setModal} parts={parts} fleet={fleet}
+          modal={modal} setModal={setModal} orgId={orgId} fleet={fleet}
           resolveFlow={resolveFlow} locationById={locationById}
           saving={saving} onCancel={() => setModal(null)} onSave={save}
         />
@@ -284,7 +301,7 @@ export default function LoadoutsPage() {
   );
 }
 
-function LoadoutModal({ modal, setModal, parts, fleet, resolveFlow, locationById, saving, onCancel, onSave }) {
+function LoadoutModal({ modal, setModal, orgId, fleet, resolveFlow, locationById, saving, onCancel, onSave }) {
   const d = modal.data;
   const updateField = (key, val) => setModal({ ...modal, data: { ...d, [key]: val } });
   const updateLine = (i, key, val) => {
@@ -292,7 +309,7 @@ function LoadoutModal({ modal, setModal, parts, fleet, resolveFlow, locationById
     items[i] = { ...items[i], [key]: val };
     updateField("lineItems", items);
   };
-  const addLine = () => updateField("lineItems", [...d.lineItems, emptyLine(parts)]);
+  const addLine = () => updateField("lineItems", [...d.lineItems, emptyLine()]);
   const removeLine = (i) => updateField("lineItems", d.lineItems.filter((_, idx) => idx !== i));
 
   const flow = resolveFlow(d.direction, d.truck_id);
@@ -329,7 +346,7 @@ function LoadoutModal({ modal, setModal, parts, fleet, resolveFlow, locationById
         </div>
         {d.lineItems.map((li, i) => (
           <div key={i} className="grid grid-cols-[2fr_1fr_auto] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0">
-            <PartPicker parts={parts} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
+            <PartPicker orgId={orgId} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
             <input type="number" min="1" className={inputCls} value={li.qty} onChange={(e) => updateLine(i, "qty", Number(e.target.value))} />
             <IconBtn danger onClick={() => removeLine(i)}><Trash2 size={14} /></IconBtn>
           </div>

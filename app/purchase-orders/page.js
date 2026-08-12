@@ -698,7 +698,7 @@ function PurchaseOrdersPageInner() {
         </Panel>
       </div>
 
-      {modal && <POModal modal={modal} setModal={setModal} parts={parts} saving={saving} onCancel={() => setModal(null)} onSave={save} />}
+      {modal && <POModal modal={modal} setModal={setModal} orgId={orgId} parts={parts} saving={saving} onCancel={() => setModal(null)} onSave={save} />}
 
       {wizard && (
         <POWizard
@@ -728,11 +728,14 @@ function PurchaseOrdersPageInner() {
 
 /*
  * =============================================================
- * EXISTING SIMPLE EDIT MODAL — UNCHANGED
+ * EXISTING SIMPLE EDIT MODAL — UNCHANGED except PartPicker now
+ * takes orgId instead of a preloaded parts array (see ui.js).
+ * `parts` is still passed/used here for unit_cost auto-fill on
+ * part selection and the totals calc below.
  * =============================================================
  */
 
-function POModal({ modal, setModal, parts, saving, onCancel, onSave }) {
+function POModal({ modal, setModal, orgId, parts, saving, onCancel, onSave }) {
   const d = modal.data;
   const updateField = (key, val) => setModal({ ...modal, data: { ...d, [key]: val } });
   const updateLine = (i, key, val) => {
@@ -767,7 +770,7 @@ function POModal({ modal, setModal, parts, saving, onCancel, onSave }) {
         </div>
         {d.lineItems.map((li, i) => (
           <div key={i} className="grid grid-cols-[2fr_0.8fr_1fr_auto] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0">
-            <PartPicker parts={parts} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
+            <PartPicker orgId={orgId} value={li.part_id} onChange={(partId) => updateLine(i, "part_id", partId)} />
             <input type="number" min="1" className={inputCls} value={li.qty} onChange={(e) => updateLine(i, "qty", Number(e.target.value))} />
             <input type="number" step="0.01" className={inputCls} value={li.unit_cost} onChange={(e) => updateLine(i, "unit_cost", Number(e.target.value))} />
             <IconBtn danger onClick={() => removeLine(i)}><Trash2 size={14} /></IconBtn>
@@ -799,6 +802,13 @@ function POModal({ modal, setModal, parts, saving, onCancel, onSave }) {
  *
  * Delivery address is NOT a step — it is always the org's
  * main warehouse (type = WAREHOUSE), set automatically.
+ *
+ * NOTE: this wizard's product picker (Step 3 "Add Products") still
+ * groups/searches over the fully-loaded `parts` array from the parent
+ * page, same as the PO line preview and CSV export elsewhere in this
+ * file — none of those were touched in this pass, so they still share
+ * the same 1000-row cap risk PartPicker used to have. Worth revisiting
+ * in a follow-up if the catalog is large.
  */
 
 const STEPS = [

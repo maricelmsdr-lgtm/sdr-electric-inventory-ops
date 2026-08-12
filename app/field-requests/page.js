@@ -23,8 +23,8 @@ const STATUS_STYLES = {
   Denied: "border-red-400/30 text-red-400",
 };
 
-const emptyReq = (parts, fleet) => ({
-  requested_by: "", truck: fleet[0]?.truck_number || "", part_id: parts[0]?.id || "",
+const emptyReq = (fleet) => ({
+  requested_by: "", truck: fleet[0]?.truck_number || "", part_id: "",
   qty_requested: 1, priority: "Normal", status: "Pending", notes: "",
 });
 
@@ -33,7 +33,11 @@ export default function FieldRequestsPage() {
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [requests, setRequests] = useState([]);
-  const [parts, setParts] = useState([]);
+  // Only the parts referenced by requests already on screen — fetched by
+  // exact id, so it can't silently miss a part regardless of catalog
+  // size. PartPicker does its own live search independently.
+  const [partsById, setPartsById] = useState({});
+  const [hasAnyParts, setHasAnyParts] = useState(true);
   const [fleet, setFleet] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -55,21 +59,36 @@ export default function FieldRequestsPage() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [{ data: partsData }, { data: fleetData }, { data: reqData, error: reqErr }] = await Promise.all([
-      supabase.from("parts").select("*").eq("org_id", orgId).order("part_no"),
+    const [{ data: fleetData }, { data: reqData, error: reqErr }, { count: partsCount }] = await Promise.all([
       supabase.from("fleet").select("*").eq("org_id", orgId).order("truck_number"),
       supabase.from("field_requests").select("*").eq("org_id", orgId).order("priority"),
+      supabase.from("parts").select("id", { count: "exact", head: true }).eq("org_id", orgId),
     ]);
     setError(reqErr?.message || "");
-    setParts(partsData || []);
     setFleet(fleetData || []);
     setRequests(reqData || []);
+    setHasAnyParts((partsCount || 0) > 0);
+
+    const partIds = [...new Set((reqData || []).map((r) => r.part_id).filter(Boolean))];
+    if (partIds.length > 0) {
+      const { data: partsData } = await supabase.from("parts").select("id, part_no").in("id", partIds);
+      setPartsById(Object.fromEntries((partsData || []).map((p) => [p.id, p])));
+    } else {
+      setPartsById({});
+    }
+
     setLoading(false);
   };
 
-  const partById = (id) => parts.find((p) => p.id === id);
+  const partById = (id) => partsById[id];
 
-  const openCreate = () => setModal({ mode: "create", data: emptyReq(parts, fleet) });
+  const partLabel = async (partId) => {
+    if (partsById[partId]) return partsById[partId].part_no;
+    const { data } = await supabase.from("parts").select("part_no").eq("id", partId).maybeSingle();
+    return data?.part_no || "";
+  };
+
+  const openCreate = () => setModal({ mode: "create", data: emptyReq(fleet) });
   const openEdit = (r) => setModal({ mode: "edit", data: { ...r } });
 
   const logActivity = async (message) => {
@@ -79,10 +98,11 @@ export default function FieldRequestsPage() {
   const save = async () => {
     const d = modal.data;
     setError("");
+    if (!d.part_id) { setError("A part is required."); return; }
     if (modal.mode === "create") {
       const { error } = await supabase.from("field_requests").insert({ ...d, org_id: orgId });
       if (error) { setError(error.message); return; }
-      await logActivity(`Field request from ${d.requested_by} (${partById(d.part_id)?.part_no || ""})`);
+      await logActivity(`Field request from ${d.requested_by} (${await partLabel(d.part_id)})`);
     } else {
       const { id, ...rest } = d;
       const { error } = await supabase.from("field_requests").update(rest).eq("id", id);
@@ -113,9 +133,9 @@ export default function FieldRequestsPage() {
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search requester, truck, part..." />
-          <PrimaryBtn onClick={openCreate} disabled={parts.length === 0}><Plus size={15} /> New Request</PrimaryBtn>
+          <PrimaryBtn onClick={openCreate} disabled={!hasAnyParts}><Plus size={15} /> New Request</PrimaryBtn>
         </div>
-        {parts.length === 0 && <div className="text-sm text-amber-400 mb-3">Add at least one part before logging a field request.</div>}
+        {!hasAnyParts && <div className="text-sm text-amber-400 mb-3">Add at least one part before logging a field request.</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         <Panel title="Field Requests" icon={ClipboardList}>
           {loading ? <div className="text-sm text-slate-500 p-2">Loading...</div> : (
@@ -158,7 +178,7 @@ export default function FieldRequestsPage() {
             </select>
           </Field>
           <Field label="Part">
-            <PartPicker parts={parts} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
+            <PartPicker orgId={orgId} value={modal.data.part_id} onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId } })} />
           </Field>
           <Field label="Qty Requested"><input type="number" min="1" className={inputCls} value={modal.data.qty_requested} onChange={(e) => setModal({ ...modal, data: { ...modal.data, qty_requested: Number(e.target.value) } })} /></Field>
           <Field label="Priority">
