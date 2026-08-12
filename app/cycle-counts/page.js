@@ -17,9 +17,12 @@ export default function CycleCountsPage() {
   const [user, setUser] = useState(null);
   const [orgId, setOrgId] = useState(null);
   const [counts, setCounts] = useState([]);
-  const [parts, setParts] = useState([]);
+  // Only the parts referenced by cycle counts already on screen — fetched
+  // by exact id, so display can't silently miss a part regardless of
+  // catalog size. PartPicker does its own live search independently.
+  const [partsById, setPartsById] = useState({});
+  const [hasAnyParts, setHasAnyParts] = useState(true);
   const [locations, setLocations] = useState([]);
-  const [stockMap, setStockMap] = useState({}); // `${part_id}:${location_id}` -> qty
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [modal, setModal] = useState(null);
@@ -40,31 +43,55 @@ export default function CycleCountsPage() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [{ data: partsData }, { data: locData }, { data: countData, error: cErr }, { data: stockData }] = await Promise.all([
-      supabase.from("parts").select("*").eq("org_id", orgId).order("part_no"),
+    const [{ data: locData }, { data: countData, error: cErr }, { count: partsCount }] = await Promise.all([
       supabase.from("locations").select("*").eq("org_id", orgId).eq("active", true).order("type").order("name"),
       supabase.from("cycle_counts").select("*").eq("org_id", orgId).order("count_date", { ascending: false }),
-      supabase.from("inventory_balances").select("part_id, location_id, quantity_on_hand").eq("org_id", orgId),
+      supabase.from("parts").select("id", { count: "exact", head: true }).eq("org_id", orgId),
     ]);
     setError(cErr?.message || "");
-    setParts(partsData || []);
     setLocations(locData || []);
     setCounts(countData || []);
-    const map = {};
-    (stockData || []).forEach((r) => { map[`${r.part_id}:${r.location_id}`] = r.quantity_on_hand; });
-    setStockMap(map);
+    setHasAnyParts((partsCount || 0) > 0);
+
+    const partIds = [...new Set((countData || []).map((c) => c.part_id).filter(Boolean))];
+    if (partIds.length > 0) {
+      const { data: partsData } = await supabase.from("parts").select("id, part_no").in("id", partIds);
+      setPartsById(Object.fromEntries((partsData || []).map((p) => [p.id, p])));
+    } else {
+      setPartsById({});
+    }
+
     setLoading(false);
   };
 
-  const partById = (id) => parts.find((p) => p.id === id);
+  const partById = (id) => partsById[id];
   const locationById = (id) => locations.find((l) => l.id === id);
-  const systemQtyAt = (partId, locId) => stockMap[`${partId}:${locId}`] || 0;
+
+  const partLabel = async (partId) => {
+    if (partsById[partId]) return partsById[partId].part_no;
+    const { data } = await supabase.from("parts").select("part_no").eq("id", partId).maybeSingle();
+    return data?.part_no || "";
+  };
+
+  // Looks up the current system quantity for a specific part+location by
+  // querying inventory_balances directly — never depends on a preloaded
+  // parts array, so it's correct no matter how large the catalog is.
+  const systemQtyAt = async (partId, locId) => {
+    if (!partId || !locId) return 0;
+    const { data } = await supabase
+      .from("inventory_balances")
+      .select("quantity_on_hand")
+      .eq("part_id", partId)
+      .eq("location_id", locId)
+      .maybeSingle();
+    return data?.quantity_on_hand || 0;
+  };
 
   const emptyCount = () => ({
     count_date: todayISO(),
     location_id: locations[0]?.id || "",
-    part_id: parts[0]?.id || "",
-    system_qty: systemQtyAt(parts[0]?.id, locations[0]?.id),
+    part_id: "",
+    system_qty: 0,
     counted_qty: 0,
     counted_by: "",
   });
@@ -79,23 +106,25 @@ export default function CycleCountsPage() {
   const save = async () => {
     const d = modal.data;
     setError("");
+    if (!d.part_id) { setError("A part is required."); return; }
     if (modal.mode === "create") {
       const { error } = await supabase.from("cycle_counts").insert({ ...d, org_id: orgId });
       if (error) { setError(error.message); return; }
-      await logActivity(`Cycle count — ${partById(d.part_id)?.part_no || ""} at ${locationById(d.location_id)?.name || ""}`);
+      await logActivity(`Cycle count — ${await partLabel(d.part_id)} at ${locationById(d.location_id)?.name || ""}`);
     } else {
       const { id, ...rest } = d;
       const { error } = await supabase.from("cycle_counts").update(rest).eq("id", id);
       if (error) { setError(error.message); return; }
-      await logActivity(`Updated cycle count for ${partById(d.part_id)?.part_no || ""}`);
+      await logActivity(`Updated cycle count for ${await partLabel(d.part_id)}`);
     }
     setModal(null);
     fetchAll();
   };
 
   const remove = async () => {
+    const label = await partLabel(confirmDelete.part_id);
     const { error } = await supabase.from("cycle_counts").delete().eq("id", confirmDelete.id);
-    if (!error) await logActivity(`Deleted cycle count for ${partById(confirmDelete.part_id)?.part_no || ""}`);
+    if (!error) await logActivity(`Deleted cycle count for ${label}`);
     setConfirmDelete(null);
     fetchAll();
   };
@@ -113,9 +142,9 @@ export default function CycleCountsPage() {
       <div className="p-4 md:p-6">
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
           <SearchInput value={q} onChange={setQ} placeholder="Search part, location, counted by..." />
-          <PrimaryBtn onClick={openCreate} disabled={parts.length === 0 || locations.length === 0}><Plus size={15} /> New Count</PrimaryBtn>
+          <PrimaryBtn onClick={openCreate} disabled={!hasAnyParts || locations.length === 0}><Plus size={15} /> New Count</PrimaryBtn>
         </div>
-        {parts.length === 0 && <div className="text-sm text-amber-400 mb-3">Add at least one part before logging a cycle count.</div>}
+        {!hasAnyParts && <div className="text-sm text-amber-400 mb-3">Add at least one part before logging a cycle count.</div>}
         {error && <div className="text-sm text-red-400 mb-3">{error}</div>}
         <Panel title="Cycle Counts" icon={ListChecks}>
           {loading ? <div className="text-sm text-slate-500 p-2">Loading...</div> : (
@@ -165,16 +194,23 @@ export default function CycleCountsPage() {
             <select
               className={inputCls}
               value={modal.data.location_id}
-              onChange={(e) => setModal({ ...modal, data: { ...modal.data, location_id: e.target.value, system_qty: systemQtyAt(modal.data.part_id, e.target.value) } })}
+              onChange={async (e) => {
+                const locId = e.target.value;
+                const qty = await systemQtyAt(modal.data.part_id, locId);
+                setModal({ ...modal, data: { ...modal.data, location_id: locId, system_qty: qty } });
+              }}
             >
               {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
             </select>
           </Field>
           <Field label="Part">
             <PartPicker
-              parts={parts}
+              orgId={orgId}
               value={modal.data.part_id}
-              onChange={(partId) => setModal({ ...modal, data: { ...modal.data, part_id: partId, system_qty: systemQtyAt(partId, modal.data.location_id) } })}
+              onChange={async (partId) => {
+                const qty = await systemQtyAt(partId, modal.data.location_id);
+                setModal({ ...modal, data: { ...modal.data, part_id: partId, system_qty: qty } });
+              }}
             />
           </Field>
           <Field label="System Qty (at this location)"><input type="number" className={inputCls} value={modal.data.system_qty} onChange={(e) => setModal({ ...modal, data: { ...modal.data, system_qty: Number(e.target.value) } })} /></Field>
