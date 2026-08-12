@@ -287,38 +287,73 @@ export default function JobDetailPage() {
           </Panel>
         )}
 
-        {/* ================= ISSUED MATERIALS (REAL) ================= */}
-        {tab === "issued" && (
-          <Panel title="Issued Materials" icon={FileText}>
-            {issuedMaterials.length === 0 ? (
-              <div className="text-sm text-slate-500 p-2">
-                Nothing manually issued to this job yet. Materials synced from ServiceM8 are
-                deducted automatically and show on the Planned Materials tab instead — use
-                "Issue Extra Materials" above only for things that never went through ServiceM8.
-              </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[600px]">
-                  <thead>
-                    <tr><Th>Product</Th><Th>Code/SKU</Th><Th className="text-right">Qty</Th><Th className="text-right">Unit Cost</Th><Th className="text-right">Total</Th><Th>Issued</Th></tr>
-                  </thead>
-                  <tbody>
-                    {issuedMaterials.map((im) => (
-                      <tr key={im.id} className="border-t border-slate-800/70">
-                        <Td>{im.parts?.part_no || "—"}</Td>
-                        <Td className="f-mono text-xs text-slate-400">{im.parts?.sku || "—"}</Td>
-                        <Td className="text-right f-mono text-emerald-400">{im.qty}</Td>
-                        <Td className="text-right f-mono">{money(im.unit_cost)}</Td>
-                        <Td className="text-right f-mono">{money(Number(im.qty) * Number(im.unit_cost))}</Td>
-                        <Td className="text-slate-400 text-xs">{fmtDateTime(im.created_at)}</Td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Panel>
-        )}
+        {/* ================= ISSUED MATERIALS (REAL, UNIFIED) ================= */}
+        {tab === "issued" && (() => {
+          // Unifies two real sources of "actually deducted stock" into one
+          // list: ServiceM8-synced job_line_items (deducted at sync time)
+          // and manually issued rows (job_issued_materials). Both are real
+          // inventory movements -- this tab is "everything that's actually
+          // gone out to this job," regardless of which path it came from.
+          const syncedRows = (job.job_line_items || [])
+            .filter((li) => li.servicem8_material_uuid)
+            .map((li) => ({
+              id: `sync-${li.id}`,
+              part_no: li.parts?.part_no,
+              sku: li.parts?.sku,
+              qty: li.qty,
+              unit_cost: li.part_cost,
+              when: null, // sync doesn't currently timestamp per-line
+              source: "sync",
+            }));
+          const manualRows = issuedMaterials.map((im) => ({
+            id: `manual-${im.id}`,
+            part_no: im.parts?.part_no,
+            sku: im.parts?.sku,
+            qty: im.qty,
+            unit_cost: im.unit_cost,
+            when: im.created_at,
+            source: "manual",
+          }));
+          const allIssued = [...syncedRows, ...manualRows];
+
+          return (
+            <Panel title="Issued Materials" icon={FileText}>
+              {allIssued.length === 0 ? (
+                <div className="text-sm text-slate-500 p-2">
+                  Nothing issued to this job yet — either from a ServiceM8 sync or manually
+                  via "Issue Extra Materials" above.
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[700px]">
+                    <thead>
+                      <tr><Th>Product</Th><Th>Code/SKU</Th><Th className="text-right">Qty</Th><Th className="text-right">Unit Cost</Th><Th className="text-right">Total</Th><Th>Source</Th><Th>Issued</Th></tr>
+                    </thead>
+                    <tbody>
+                      {allIssued.map((row) => (
+                        <tr key={row.id} className="border-t border-slate-800/70">
+                          <Td>{row.part_no || "—"}</Td>
+                          <Td className="f-mono text-xs text-slate-400">{row.sku || "—"}</Td>
+                          <Td className="text-right f-mono text-emerald-400">{row.qty}</Td>
+                          <Td className="text-right f-mono">{money(row.unit_cost)}</Td>
+                          <Td className="text-right f-mono">{money(Number(row.qty) * Number(row.unit_cost))}</Td>
+                          <Td>
+                            {row.source === "sync" ? (
+                              <span className="text-[10px] f-mono uppercase text-sky-400 border border-sky-400/30 rounded px-1.5 py-0.5">ServiceM8 Sync</span>
+                            ) : (
+                              <span className="text-[10px] f-mono uppercase text-slate-500 border border-slate-700 rounded px-1.5 py-0.5">Manual</span>
+                            )}
+                          </Td>
+                          <Td className="text-slate-400 text-xs">{row.when ? fmtDateTime(row.when) : "—"}</Td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Panel>
+          );
+        })()}
 
         {/* ================= PURCHASES (REAL) ================= */}
         {tab === "purchases" && (
@@ -467,9 +502,9 @@ function IssueMaterialsModal({ job, parts, issuedQtyByPart, onClose, onIssued, l
   return (
     <ModalShell title={`Issue Extra Materials — #${job.job_no}`} icon={Send} onClose={onClose} wide>
       <div className="text-xs text-slate-500 mb-3">
-        For materials that never went through a ServiceM8 sync — those already deducted
-        stock automatically. Deducts real inventory at{" "}
-        <span className="text-slate-300">{job.locations?.name || "this job's location"}</span>.
+        For materials that never went through a ServiceM8 sync. This deducts real inventory
+        at <span className="text-slate-300">{job.locations?.name || "this job's location"}</span> and
+        will show up alongside synced deductions on the Issued Materials tab.
       </div>
 
       {error && <div className="text-sm text-red-400 mb-3 border border-red-900/50 bg-red-950/20 rounded px-3 py-2">{error}</div>}
