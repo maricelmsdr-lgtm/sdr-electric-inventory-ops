@@ -1,459 +1,1224 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
-import { getValidAccessToken, fetchJobs, fetchJobMaterialsForJobs, fetchCompanies, fetchMaterialsCatalog } from "@/lib/servicem8";
+import {
+  getValidAccessToken,
+  fetchJobs,
+  fetchJobMaterialsForJobs,
+  fetchCompanies,
+  fetchMaterialsCatalog,
+} from "@/lib/servicem8";
 
-// Retrying through a rate limit can take a while (see sm8Fetch's backoff),// so give this route more room than the default 10s.
+// Retrying through a rate limit can take a while.
 export const maxDuration = 60;
 
-/* ============================================================
-   HELPERS
-   ============================================================ */
+const JOB_BATCH_SIZE = 10;
+const SYNC_WINDOW_DAYS = 14;
 
-function normalize(value) {
-  return String(value ?? "")
+// ------------------------------------------------------------
+// NON-INVENTORY SERVICE / LABOR DETECTION
+// ------------------------------------------------------------
+
+function isNonInventoryCharge(name) {
+  const value = String(name || "")
     .trim()
     .toLowerCase()
     .replace(/[\u2013\u2014]/g, "-")
     .replace(/\s+/g, " ");
-}
 
-// ServiceM8 sends labor, travel, and service-call charges through the same// jobmaterial endpoint as real parts. These aren't inventory â€” matching them
-// against the parts catalog would either wrongly deduct a real part's stock
-// (false positive) or just pile up as permanent "no match" noise in Needs
-// Review (since there's no part named "Technician Labour After Hours").
-// Skipped entirely, not flagged â€” there's nothing here to review.
-function isNonInventoryCharge(name) {
-  const value = normalize(name);
   if (!value) return false;
 
+  // Labor / labour
   if (/\blabou?r\b/i.test(value)) return true;
+
+  // Hours / hr / hrs
   if (/\bhours?\b/i.test(value)) return true;
   if (/\b(?:\d+(?:\.\d+)?\s*)?hrs?\b/i.test(value)) return true;
   if (/\bafter\s+hours?\b/i.test(value)) return true;
-  if (/\btechnician\b.*\b(?:apprentice|hours?|hrs?|hr)\b/i.test(value)) return true;
-  if (/\bapprentice\b.*\b(?:technician|hours?|hrs?|hr)\b/i.test(value)) return true;
+
+  // Technician / apprentice labor
+  if (/\btechnician\b.*\b(?:apprentice|hours?|hrs?|hr)\b/i.test(value)) {
+    return true;
+  }
+
+  // Service charges
   if (/\bservice\s+call\s+fee\b/i.test(value)) return true;
   if (/\bservice\s+fee\b/i.test(value)) return true;
   if (/\bservice\s+rate\b/i.test(value)) return true;
   if (/\bservice\s+charge\b/i.test(value)) return true;
   if (/\btruck\s+charge\b/i.test(value)) return true;
-  if (/\bcall\s*-?\s*out\s+(?:fee|charge|rate)\b/i.test(value)) return true;
+  if (/\bcall\s*-?\s*out\s+(?:fee|charge|rate)\b/i.test(value)) {
+    return true;
+  }
   if (/\btravel\s+(?:fee|charge)\b/i.test(value)) return true;
-  if (/\b(?:after[- ]installation|post[- ]installation)\b.*\bcallback\b/i.test(value)) return true;
-  if (/\bwarranty\b/i.test(value) && /\b(?:service|callback|labor|labour|charge|fee)\b/i.test(value)) return true;
+
+  // Warranty / callback service
+  if (
+    /\b(?:after[- ]installation|post[- ]installation)\b.*\bcallback\b/i.test(
+      value
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\bwarranty\b/i.test(value) &&
+    /\b(?:service|callback|labor|labour|charge|fee)\b/i.test(value)
+  ) {
+    return true;
+  }
 
   return false;
 }
 
-// ServiceM8 represents a "Job Material Bundle" (e.g. one invoice line like// "$JOBMATERIAL â€” Materials 8 inch black nylon cable ties and wire spice// kit") as several separate jobmaterial rows: one HEADER row (the bundle
-// itself â€” not physical inventory) plus several CHILD rows underneath it// (the actual parts, e.g. TYWRAP8MOUNTBLK, HSK4 â€” these ARE inventory).
-// Every child's job_material_bundle_uuid points at the header's own uuid.
-// So: collect every job_material_bundle_uuid value seen across the batch,
-// then any material whose OWN uuid appears in that set is a header â€” skip
-// it entirely (it's just a rollup label, not a real deduction).
-function isBundleHeader(material, bundleHeaderUuids) {
-  if (!material?.uuid) return false;
-  if (bundleHeaderUuids.has(String(material.uuid))) return true;
-  const name = normalize(material.name);
-  if (name === "$jobmaterial" || name === "jobmaterial" || name === "materials") return true;
-  // Fallback for cases where the structural link isn't available this run
-  // (e.g. the bundle's children weren't in this batch) â€” ServiceM8 marks  // these rollup/placeholder rows inactive (active: 0) even standalone,
-  // distinct from a real material that's just out of stock or deleted for
-  // an unrelated reason. A generic name like "Project based Materials"
-  // combined with active: 0 is the same "this isn't a real part" signal.
-  if (Number(material.active) === 0 && /materials?$/i.test(name)) return true;
-  return false;
+// ------------------------------------------------------------
+// NORMALIZE LOOKUP KEY
+// ------------------------------------------------------------
+
+function normalizeKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
 }
 
-// Catches cases like "SUBMERSIBLE 4-WIRE CLEAR HEAT SHRINK SPLICE KIT
-// HSKC-4" where the real part number/SKU is embedded at the end of an
-// otherwise-descriptive name. Two passes: first the confident one
-// (hyphen/underscore/slash-joined tokens like "HSKC-4" or "F/UVMAX" â€”
-// that punctuation is a strong signal it's a code, not English prose),
-// then a looser fallback (a single run of 5+ letters-and-digits mixed,
-// like "114X8CPEXTTUBESJN") tried only if nothing from the first pass
-// matched a real part â€” mixed letters+digits of that length essentially
-// never occurs in ordinary description text, so it's safe as a last resort.
-function extractCodeTokens(text) {
-  const value = String(text ?? "");
-  const punctuated = value.match(/\b[A-Za-z0-9]+(?:[-_/][A-Za-z0-9]+)+\b/g) || [];
-  const looseCandidates = value.match(/\b[A-Za-z0-9]{5,}\b/g) || [];
-  const loose = looseCandidates.filter((t) => /[A-Za-z]/.test(t) && /[0-9]/.test(t));
-  return [...punctuated, ...loose];
+// ------------------------------------------------------------
+// BUILD SERVICE M8 MATERIAL CATALOG LOOKUP
+// ------------------------------------------------------------
+//
+// ServiceM8 jobmaterial.json gives us material_uuid.
+// The actual material code such as TYWRAP8MOUNTBLK is in
+// material.json as item_number.
+//
+// UUID -> catalog material
+// ------------------------------------------------------------
+
+function buildCatalogByUuid(catalog) {
+  const lookup = {};
+
+  for (const item of catalog || []) {
+    const uuid = normalizeKey(item?.uuid);
+
+    if (!uuid) continue;
+
+    lookup[uuid] = item;
+  }
+
+  return lookup;
 }
+
+// ------------------------------------------------------------
+// GET BEST SERVICE M8 MATERIAL IDENTIFIERS
+// ------------------------------------------------------------
+
+function resolveCatalogMaterial(jobMaterial, catalogByUuid) {
+  const materialUuid = normalizeKey(jobMaterial?.material_uuid);
+
+  const catalogItem = materialUuid
+    ? catalogByUuid[materialUuid]
+    : null;
+
+  const itemNumber = String(
+    catalogItem?.item_number ||
+      catalogItem?.item_no ||
+      catalogItem?.code ||
+      ""
+  ).trim();
+
+  const catalogName = String(
+    catalogItem?.name ||
+      catalogItem?.description ||
+      ""
+  ).trim();
+
+  const jobMaterialName = String(
+    jobMaterial?.name ||
+      jobMaterial?.description ||
+      ""
+  ).trim();
+
+  return {
+    catalogItem,
+    materialUuid,
+    itemNumber,
+    catalogName,
+    jobMaterialName,
+  };
+}
+
+// ------------------------------------------------------------
+// POST
+// ------------------------------------------------------------
 
 export async function POST(request) {
   const t0 = Date.now();
-  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
-  const { access_token, start_date, end_date } = await request.json().catch(() => ({}));
+  const elapsed = () =>
+    `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+
+  const { access_token } = await request
+    .json()
+    .catch(() => ({}));
+
   if (!access_token) {
-    return NextResponse.json({ error: "Missing session." }, { status: 401 });
+    return NextResponse.json(
+      { error: "Missing session." },
+      { status: 401 }
+    );
   }
 
   let admin;
+
   try {
     admin = supabaseAdmin();
   } catch {
-    return NextResponse.json({ error: "Server isn't configured yet (missing Supabase service key)." }, { status: 500 });
+    return NextResponse.json(
+      {
+        error:
+          "Server isn't configured yet (missing Supabase service key).",
+      },
+      { status: 500 }
+    );
   }
 
-  const { data: userData, error: userErr } = await admin.auth.getUser(access_token);
+  // ------------------------------------------------------------
+  // AUTHENTICATE USER
+  // ------------------------------------------------------------
+
+  const { data: userData, error: userErr } =
+    await admin.auth.getUser(access_token);
+
   if (userErr || !userData?.user) {
-    return NextResponse.json({ error: "Invalid session." }, { status: 401 });
+    return NextResponse.json(
+      { error: "Invalid session." },
+      { status: 401 }
+    );
   }
+
+  // ------------------------------------------------------------
+  // GET ORGANIZATION
+  // ------------------------------------------------------------
 
   const { data: profile } = await admin
     .from("profiles")
     .select("org_id")
     .eq("id", userData.user.id)
     .single();
+
   if (!profile?.org_id) {
-    return NextResponse.json({ error: "No organization found." }, { status: 400 });
+    return NextResponse.json(
+      { error: "No organization found." },
+      { status: 400 }
+    );
   }
+
+  const orgId = profile.org_id;
+
+  // ------------------------------------------------------------
+  // GET SERVICEM8 INTEGRATION
+  // ------------------------------------------------------------
 
   const { data: integration } = await admin
     .from("integrations")
     .select("id, connected")
-    .eq("org_id", profile.org_id)
+    .eq("org_id", orgId)
     .eq("provider", "servicem8")
     .single();
+
   if (!integration?.connected) {
-    return NextResponse.json({ error: "ServiceM8 isn't connected." }, { status: 400 });
+    return NextResponse.json(
+      { error: "ServiceM8 isn't connected." },
+      { status: 400 }
+    );
   }
 
   let sm8Token;
+
   try {
-    sm8Token = await getValidAccessToken(admin, integration.id);
+    sm8Token = await getValidAccessToken(
+      admin,
+      integration.id
+    );
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 400 });
+    return NextResponse.json(
+      { error: e.message },
+      { status: 400 }
+    );
   }
+
+  // ------------------------------------------------------------
+  // MAIN WAREHOUSE
+  // ------------------------------------------------------------
 
   const { data: mainLoc } = await admin
     .from("locations")
     .select("id")
-    .eq("org_id", profile.org_id)
+    .eq("org_id", orgId)
     .eq("code", "MAIN")
     .single();
+
   if (!mainLoc?.id) {
-    return NextResponse.json({ error: "No Main Warehouse location found for this org â€” set one up before syncing." }, { status: 400 });
+    return NextResponse.json(
+      {
+        error:
+          "No Main Warehouse location found for this org — set one up before syncing.",
+      },
+      { status: 400 }
+    );
   }
 
-  // Date range now comes from the UI's date-range picker instead of a
-  // fixed lookback â€” capped at 30 days per request so a single sync can't
-  // pull in a huge batch and blow past the route's time limit. Falls back
-  // to "last 30 days" if the caller doesn't supply one (defensive only â€”  // the UI always sends both dates via the picker modal).
-  let cutoffStr, endStr;
-  if (start_date || end_date) {
-    const start = start_date ? new Date(start_date) : null;
-    const end = end_date ? new Date(end_date) : null;
-    if (!start || Number.isNaN(start.getTime()) || !end || Number.isNaN(end.getTime())) {
-      return NextResponse.json({ error: "Invalid start or end date." }, { status: 400 });
-    }
-    if (start > end) {
-      return NextResponse.json({ error: "Start date must be before end date." }, { status: 400 });
-    }
-    const rangeDays = (end - start) / (1000 * 60 * 60 * 24);
-    if (rangeDays > 30) {
-      return NextResponse.json({ error: "Date range can't be more than 30 days." }, { status: 400 });
-    }
-    cutoffStr = start.toISOString().slice(0, 10);
-    endStr = end.toISOString().slice(0, 10);
-  } else {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 30);
-    cutoffStr = cutoff.toISOString().slice(0, 10);
-    endStr = new Date().toISOString().slice(0, 10);
-  }
+  // ------------------------------------------------------------
+  // FETCH RECENT SERVICEM8 JOBS
+  // ------------------------------------------------------------
 
-  let sm8Jobs, sm8Companies;
+  const cutoff = new Date();
+
+  cutoff.setDate(
+    cutoff.getDate() - SYNC_WINDOW_DAYS
+  );
+
+  const cutoffStr = cutoff
+    .toISOString()
+    .slice(0, 10);
+
+  let sm8Jobs;
+  let sm8Companies;
+  let sm8Catalog;
+
   try {
-    [sm8Jobs, sm8Companies] = await Promise.all([fetchJobs(sm8Token, cutoffStr), fetchCompanies(sm8Token)]);
+    // IMPORTANT:
+    // The catalog is fetched account-wide once.
+    //
+    // jobmaterial.json gives us material_uuid.
+    // material.json gives us item_number.
+    //
+    // We need both to correctly identify actual issued parts.
+
+    [sm8Jobs, sm8Companies, sm8Catalog] =
+      await Promise.all([
+        fetchJobs(sm8Token, cutoffStr),
+        fetchCompanies(sm8Token),
+        fetchMaterialsCatalog(sm8Token),
+      ]);
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 502 });
+    console.error(
+      "[sm8 sync] initial ServiceM8 fetch failed:",
+      e
+    );
+
+    return NextResponse.json(
+      {
+        error: e.message,
+      },
+      { status: 502 }
+    );
   }
-  // fetchJobs only supports a lower bound (ServiceM8's filter API only
-  // offers `gt`), so the upper bound of the range is applied here instead.  sm8Jobs = (sm8Jobs || []).filter((j) => !j.date || j.date.slice(0, 10) <= endStr);
-  console.log(`[sm8 sync] fetched ${sm8Jobs?.length ?? 0} jobs, ${sm8Companies?.length ?? 0} companies â€” ${elapsed()}`);
+
+  console.log(
+    `[sm8 sync] fetched ${
+      sm8Jobs?.length ?? 0
+    } jobs, ${
+      sm8Companies?.length ?? 0
+    } companies, ${
+      sm8Catalog?.length ?? 0
+    } catalog materials — ${elapsed()}`
+  );
+
+  // ------------------------------------------------------------
+  // SERVICE M8 MATERIAL CATALOG LOOKUP
+  // ------------------------------------------------------------
+
+  const catalogByUuid =
+    buildCatalogByUuid(sm8Catalog);
+
+  // ------------------------------------------------------------
+  // COMPANY LOOKUP
+  // ------------------------------------------------------------
 
   const companyName = {};
-  for (const c of sm8Companies || []) companyName[c.uuid] = c.name;
 
-  // Skip quotes and cancelled jobs â€” only pull real work. Note: we don't  // filter on ServiceM8's "active" flag â€” it goes to 0 once a job is marked
-  // Completed, which is exactly the job state we most want to sync (that's  // when materials used are finalized).
-  //
-  // Also skip ServiceM8's own built-in "SAMPLE Â· Help Guide Job" â€” every new
-  // ServiceM8 account gets one automatically, with placeholder tooltip text
-  // as fake material line items ("click produce invoice to...", etc). It's  // not real customer work, so it shouldn't show up in Jobs or generate
-  // "Needs Review" noise on every sync.
-  // BUGFIX-002: a job deleted from SDR leaves no trace of its
-  // servicem8_job_uuid in `jobs` (cascade delete), so without this
-  // exclusion it looks identical to a job ServiceM8 has never sent
-  // before â€” the sync would re-import it and re-deduct every material
-  // on it. See supabase/010_prevent_resync_of_deleted_jobs.sql.
-  const { data: deletedTombstones } = await admin
-    .from("servicem8_deleted_jobs")
-    .select("servicem8_job_uuid")
-    .eq("org_id", profile.org_id);
-  const deletedUuids = new Set((deletedTombstones || []).map((t) => t.servicem8_job_uuid));
+  for (const c of sm8Companies || []) {
+    companyName[c.uuid] = c.name;
+  }
+
+  // ------------------------------------------------------------
+  // FILTER RELEVANT JOBS
+  // ------------------------------------------------------------
 
   const relevantJobs = (sm8Jobs || []).filter((j) => {
-    if (!j.uuid || !j.status || j.status === "Quote" || j.status === "Cancelled") return false;
-    if (deletedUuids.has(j.uuid)) return false;
-    const jobNo = (j.generated_job_id || "").trim().toUpperCase();
-    const client = (companyName[j.company_uuid] || "").trim().toLowerCase();
-    if (jobNo === "SAMPLE" || client.includes("help guide")) return false;
+    if (
+      !j.uuid ||
+      !j.status ||
+      j.status === "Quote" ||
+      j.status === "Cancelled"
+    ) {
+      return false;
+    }
+
+    const jobNo = (
+      j.generated_job_id || ""
+    )
+      .trim()
+      .toUpperCase();
+
+    const client = (
+      companyName[j.company_uuid] || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    // Ignore ServiceM8 built-in sample job.
+    if (
+      jobNo === "SAMPLE" ||
+      client.includes("help guide")
+    ) {
+      return false;
+    }
+
     return true;
   });
+
+  relevantJobs.sort((a, b) =>
+    String(a.uuid).localeCompare(
+      String(b.uuid)
+    )
+  );
+
+  console.log(
+    `[sm8 sync] ${relevantJobs.length} relevant jobs after filtering — ${elapsed()}`
+  );
+
+  // ------------------------------------------------------------
+  // LOAD EXISTING JOBS
+  // ------------------------------------------------------------
 
   const { data: existingJobs } = await admin
     .from("jobs")
     .select("id, servicem8_job_uuid")
-    .eq("org_id", profile.org_id)
+    .eq("org_id", orgId)
     .not("servicem8_job_uuid", "is", null);
-  const jobIdByUuid = Object.fromEntries((existingJobs || []).map((j) => [j.servicem8_job_uuid, j.id]));
-  const preExistingUuids = new Set(Object.keys(jobIdByUuid));
 
-  // Upsert every job in ONE call instead of one HTTP round trip per job â€”
-  // with a few hundred jobs in a 90-day window, that per-row approach was
-  // most of what blew past Vercel's 60s limit. See supabase/007_bulk_sync_functions.sql.
+  const jobIdByUuid = Object.fromEntries(
+    (existingJobs || []).map((j) => [
+      j.servicem8_job_uuid,
+      j.id,
+    ])
+  );
+
+  const preExistingUuids = new Set(
+    Object.keys(jobIdByUuid)
+  );
+
+  // ------------------------------------------------------------
+  // UPSERT JOBS
+  // ------------------------------------------------------------
+
   let jobsCreated = 0;
   let jobsUpdated = 0;
+
   if (relevantJobs.length > 0) {
     const jobRows = relevantJobs.map((j) => ({
-      org_id: profile.org_id,
-      job_no: j.generated_job_id || j.uuid,
-      client: companyName[j.company_uuid] || "Unknown client",
+      org_id: orgId,
+      job_no:
+        j.generated_job_id || j.uuid,
+      client:
+        companyName[j.company_uuid] ||
+        "Unknown client",
       address: j.job_address || null,
-      job_date: (j.date || "").slice(0, 10) || new Date().toISOString().slice(0, 10),
+      job_date:
+        (j.date || "").slice(0, 10) ||
+        new Date()
+          .toISOString()
+          .slice(0, 10),
       location_id: mainLoc.id,
       servicem8_job_uuid: j.uuid,
     }));
-    const { data: upserted, error: upsertErr } = await admin.rpc("upsert_synced_jobs", { p_jobs: jobRows });
+
+    const {
+      data: upserted,
+      error: upsertErr,
+    } = await admin.rpc(
+      "upsert_synced_jobs",
+      {
+        p_jobs: jobRows,
+      }
+    );
+
     if (upsertErr) {
-      return NextResponse.json({ error: `Job upsert failed: ${upsertErr.message}` }, { status: 500 });
+      return NextResponse.json(
+        {
+          error:
+            `Job upsert failed: ${upsertErr.message}`,
+        },
+        { status: 500 }
+      );
     }
+
     for (const row of upserted || []) {
-      jobIdByUuid[row.servicem8_job_uuid] = row.id;
-      if (preExistingUuids.has(row.servicem8_job_uuid)) jobsUpdated++;
-      else jobsCreated++;
+      jobIdByUuid[
+        row.servicem8_job_uuid
+      ] = row.id;
+
+      if (
+        preExistingUuids.has(
+          row.servicem8_job_uuid
+        )
+      ) {
+        jobsUpdated++;
+      } else {
+        jobsCreated++;
+      }
     }
   }
-  console.log(`[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) â€” ${elapsed()}`);
 
-  // Fetch materials per job (ServiceM8 requires the $filter=job_uuid query â€”
-  // an unfiltered bulk call doesn't reliably return everything), and the
-  // materials catalog, CONCURRENTLY â€” they're independent ServiceM8 calls,
-  // and running the catalog fetch after materials used to just add its
-  // duration on top sequentially. deadlineMs is measured from the route's
-  // own start (t0), not from when this call begins, so it accounts for
-  // time already spent on setup/job-upsert and leaves room for the catalog  // fetch and the final bulk write below â€” 38s here, out of the route's
-  // 60s hard cap, leaves ~22s for everything else.
-  const materialsDeadline = t0 + 38_000;
-  const [materialsResult, catalogResult] = await Promise.allSettled([
-    fetchJobMaterialsForJobs(sm8Token, Object.keys(jobIdByUuid), materialsDeadline),
-    fetchMaterialsCatalog(sm8Token),
-  ]);
-
-  if (materialsResult.status === "rejected") {
-    return NextResponse.json({ error: materialsResult.reason?.message || "Materials fetch failed." }, { status: 502 });
-  }
-  const sm8Materials = materialsResult.value;
-  console.log(`[sm8 sync] fetched ${sm8Materials.length} material lines across ${Object.keys(jobIdByUuid).length} jobs â€” ${elapsed()}`);
-
-  // Bundle headers ("$JOBMATERIAL" rollup rows) aren't physical inventory â€”
-  // see isBundleHeader's comment. Build the header-uuid set once for the
-  // whole batch.
-  const bundleHeaderUuids = new Set(
-    (sm8Materials || []).map((m) => m?.job_material_bundle_uuid).filter(Boolean).map(String)
+  console.log(
+    `[sm8 sync] upserted ${relevantJobs.length} jobs (${jobsCreated} new, ${jobsUpdated} updated) — ${elapsed()}`
   );
 
-  // Materials catalog: ServiceM8 keeps the real item code (e.g.
-  // "TYWRAP8MOUNTBLK") separate from the jobmaterial line's human-readable  // name ("TYWRAP 8 BLACK WITH MOUNTING HOLE") â€” the code lives in a
-  // separate catalog record referenced by material_uuid. Requires the
-  // read_inventory scope; if an org connected before that scope was added,  // this 403s and we fall back to name-only matching instead of failing
-  // the whole sync.
-  const catalogAvailable = catalogResult.status === "fulfilled";
-  const sm8MaterialsCatalog = catalogAvailable ? catalogResult.value : [];
-  if (!catalogAvailable) {
-    console.log(`[sm8 sync] materials catalog unavailable (probably needs reconnect for read_inventory scope): ${catalogResult.reason?.message}`);
-  }
-  const catalogByUuid = {};
-  for (const c of sm8MaterialsCatalog || []) catalogByUuid[c.uuid] = c;
-  console.log(`[sm8 sync] materials catalog: ${sm8MaterialsCatalog.length} items, available=${catalogAvailable} â€” ${elapsed()}`);
+  // ------------------------------------------------------------
+  // CHECKPOINT
+  // ------------------------------------------------------------
 
-  const { data: parts } = await admin
-    .from("parts")
-    .select("id, sku, part_no, unit_cost")
-    .eq("org_id", profile.org_id);
+  const allJobUuids = relevantJobs
+    .map((j) => j.uuid)
+    .filter(Boolean);
+
+  const {
+    data: syncState,
+    error: syncStateErr,
+  } = await admin
+    .from("servicem8_sync_state")
+    .select(
+      "org_id, job_uuids, next_index, sync_started_at, updated_at"
+    )
+    .eq("org_id", orgId)
+    .maybeSingle();
+
+  if (syncStateErr) {
+    return NextResponse.json(
+      {
+        error:
+          `Could not load ServiceM8 sync checkpoint: ${syncStateErr.message}`,
+      },
+      { status: 500 }
+    );
+  }
+
+  const savedJobUuids = Array.isArray(
+    syncState?.job_uuids
+  )
+    ? syncState.job_uuids
+    : [];
+
+  const sameJobSet =
+    savedJobUuids.length ===
+      allJobUuids.length &&
+    savedJobUuids.every(
+      (uuid, index) =>
+        uuid === allJobUuids[index]
+    );
+
+  let nextIndex = 0;
+
+  if (
+    syncState &&
+    sameJobSet &&
+    Number(syncState.next_index || 0) <
+      allJobUuids.length
+  ) {
+    nextIndex = Math.max(
+      0,
+      Number(syncState.next_index || 0)
+    );
+  }
+
+  // ------------------------------------------------------------
+  // NO JOBS
+  // ------------------------------------------------------------
+
+  if (allJobUuids.length === 0) {
+    await admin
+      .from("servicem8_sync_state")
+      .upsert({
+        org_id: orgId,
+        job_uuids: [],
+        next_index: 0,
+        sync_started_at:
+          new Date().toISOString(),
+        updated_at:
+          new Date().toISOString(),
+      });
+
+    await admin
+      .from("integrations")
+      .update({
+        last_synced_at:
+          new Date().toISOString(),
+      })
+      .eq("id", integration.id);
+
+    return NextResponse.json({
+      ok: true,
+      syncComplete: true,
+      jobsCreated,
+      jobsUpdated,
+      materialsDeducted: 0,
+      materialsFlagged: 0,
+      totalJobs: 0,
+      nextIndex: 0,
+      message:
+        "No relevant ServiceM8 jobs found in the sync window.",
+      diagnostics: {
+        elapsed: elapsed(),
+        serviceM8CatalogCount:
+          sm8Catalog?.length ?? 0,
+      },
+    });
+  }
+
+  // ------------------------------------------------------------
+  // SAVE / UPDATE CHECKPOINT BEFORE MATERIAL FETCH
+  // ------------------------------------------------------------
+
+  if (!syncState || !sameJobSet) {
+    nextIndex = 0;
+
+    const {
+      error: checkpointErr,
+    } = await admin
+      .from("servicem8_sync_state")
+      .upsert({
+        org_id: orgId,
+        job_uuids: allJobUuids,
+        next_index: 0,
+        sync_started_at:
+          new Date().toISOString(),
+        updated_at:
+          new Date().toISOString(),
+      });
+
+    if (checkpointErr) {
+      return NextResponse.json(
+        {
+          error:
+            `Could not initialize ServiceM8 sync checkpoint: ${checkpointErr.message}`,
+        },
+        { status: 500 }
+      );
+    }
+  }
+
+  // ------------------------------------------------------------
+  // DETERMINE BATCH
+  // ------------------------------------------------------------
+
+  const batchStart = nextIndex;
+
+  const batchJobUuids = allJobUuids.slice(
+    batchStart,
+    batchStart + JOB_BATCH_SIZE
+  );
+
+  const batchEnd =
+    batchStart + batchJobUuids.length;
+
+  console.log(
+    `[sm8 sync] processing jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length} — ${elapsed()}`
+  );
+
+  // ------------------------------------------------------------
+  // FETCH MATERIALS FOR THIS BATCH
+  // ------------------------------------------------------------
+
+  let sm8Materials = [];
+
+  try {
+    sm8Materials =
+      await fetchJobMaterialsForJobs(
+        sm8Token,
+        batchJobUuids
+      );
+  } catch (e) {
+    console.error(
+      `[sm8 sync] material fetch failed for jobs ${batchStart + 1}-${batchEnd}:`,
+      e
+    );
+
+    return NextResponse.json(
+      {
+        error: e.message,
+        syncComplete: false,
+        retryable: true,
+        checkpoint: {
+          nextIndex: batchStart,
+          totalJobs:
+            allJobUuids.length,
+          jobsAttempted:
+            batchJobUuids.length,
+        },
+        message:
+          "Material sync stopped at the current checkpoint. The next Sync will retry this batch.",
+      },
+      { status: 502 }
+    );
+  }
+
+  console.log(
+    `[sm8 sync] fetched ${sm8Materials.length} material lines across ${batchJobUuids.length} jobs — ${elapsed()}`
+  );
+
+  // ------------------------------------------------------------
+  // LOAD SDR PARTS
+  // ------------------------------------------------------------
+
+  const { data: parts, error: partsErr } =
+    await admin
+      .from("parts")
+      .select(
+        "id, sku, part_no, unit_cost"
+      )
+      .eq("org_id", orgId);
+
+  if (partsErr) {
+    return NextResponse.json(
+      {
+        error:
+          `Could not load SDR parts: ${partsErr.message}`,
+      },
+      { status: 500 }
+    );
+  }
+
   const partByKey = {};
-  const partsById = {};
+
   for (const p of parts || []) {
-    partsById[p.id] = p;
-    if (p.sku) partByKey[normalize(p.sku)] = p;
-    if (p.part_no) partByKey[normalize(p.part_no)] = p;
+    if (p.sku) {
+      partByKey[
+        normalizeKey(p.sku)
+      ] = p;
+    }
+
+    if (p.part_no) {
+      partByKey[
+        normalizeKey(p.part_no)
+      ] = p;
+    }
   }
 
-  // Aliases learned from manual "Needs Review" resolutions (see
-  // resolveUnmatched in app/integrations/page.js) â€” once someone points
-  // "TYWRAP 8 BLACK WITH MOUNTING HOLE" at TYWRAP8MOUNTBLK one time, every  // future occurrence of that exact ServiceM8 name auto-matches without
-  // needing the catalog fetch or manual review again.
-  const { data: aliases } = await admin
-    .from("part_aliases")
-    .select("alias_name, part_id")
-    .eq("org_id", profile.org_id);
-  const partByAlias = {};
-  for (const a of aliases || []) {
-    const p = partsById[a.part_id];
-    if (p) partByAlias[normalize(a.alias_name)] = p;
+  // ------------------------------------------------------------
+  // LOAD ALREADY PROCESSED MATERIALS
+  // ------------------------------------------------------------
+
+  const {
+    data: alreadySyncedLines,
+    error: syncedErr,
+  } = await admin
+    .from("job_line_items")
+    .select(
+      "servicem8_material_uuid"
+    )
+    .not(
+      "servicem8_material_uuid",
+      "is",
+      null
+    );
+
+  if (syncedErr) {
+    return NextResponse.json(
+      {
+        error:
+          `Could not load processed materials: ${syncedErr.message}`,
+      },
+      { status: 500 }
+    );
   }
-  console.log(`[sm8 sync] loaded ${aliases?.length ?? 0} learned part aliases`);
 
-  // NOTE: previously this route also loaded `alreadySyncedLines` (every
-  // job_line_items row with a servicem8_material_uuid already set) and
-  // used it to drop any material we'd already synced once before. That
-  // meant a line whose ServiceM8 qty changed after the first sync (e.g.
-  // 2 -> 5) was silently ignored forever -- nothing extra ever got
-  // deducted. Diff-based deduction (010_diff_based_material_deduction.sql)
-  // now handles that INSIDE process_synced_materials: it looks up any
-  // existing job_line_items row for the same servicem8_material_uuid,
-  // deducts only the qty difference, and updates the stored qty. So we
-  // deliberately no longer filter out already-synced uuids here --  // every material line ServiceM8 currently reports gets sent through, and
-  // the database decides whether there's anything new to deduct.
+  const syncedUuids = new Set(
+    (alreadySyncedLines || []).map(
+      (l) =>
+        normalizeKey(
+          l.servicem8_material_uuid
+        )
+    )
+  );
 
-  // Only a FINAL human decision (resolved or explicitly ignored) permanently
-  // excludes a material. A "pending" Needs Review flag does NOT â€” matching
-  // has kept improving (aliases, catalog-code lookup, bundle/non-inventory  // filtering all landed after some materials were already flagged), so
-  // pending items get retried against the current matching logic on every
-  // sync instead of being stuck forever with whatever the matcher could do  // the first time it saw them. process_synced_materials upserts rather
-  // than blind-inserts, so a retry that still fails doesn't create a
-  // duplicate row â€” it just updates the existing pending one.
-  const { data: alreadyDecided } = await admin
+  // ------------------------------------------------------------
+  // LOAD FLAGGED MATERIALS
+  // ------------------------------------------------------------
+  //
+  // We DO NOT permanently skip a flagged UUID if it now
+  // matches an SDR part.
+  //
+  // This is important:
+  //
+  // Stock = 0 today
+  //       ↓
+  // flagged insufficient_stock
+  //       ↓
+  // stock is replenished tomorrow
+  //       ↓
+  // next ServiceM8 sync can attempt deduction again
+  //
+  // But an unmatched item with no SDR part remains skipped
+  // so we don't create endless duplicate "no_match" rows.
+  // ------------------------------------------------------------
+
+  const {
+    data: alreadyFlagged,
+    error: flaggedErr,
+  } = await admin
     .from("unmatched_materials")
-    .select("servicem8_material_uuid")
-    .in("status", ["resolved", "ignored"]);
-  const decidedUuids = new Set((alreadyDecided || []).map((f) => f.servicem8_material_uuid));
+    .select(
+      "servicem8_material_uuid, reason"
+    );
 
-  // Match materials to the parts catalog, then hand the whole resolved
-  // batch to Postgres in ONE call instead of one HTTP round trip per line.  // Match order (first hit wins):
-  //   1. Learned alias (exact name seen before, manually resolved once)
-  //   2. ServiceM8 catalog item code (via material_uuid â†’ material.json)  //   3. Direct name/SKU/part_no match
-  //   4. A code-shaped token embedded in the name (e.g. "HSKC-4" inside
-  //      "SUBMERSIBLE 4-WIRE CLEAR HEAT SHRINK SPLICE KIT HSKC-4")
+  if (flaggedErr) {
+    return NextResponse.json(
+      {
+        error:
+          `Could not load flagged materials: ${flaggedErr.message}`,
+      },
+      { status: 500 }
+    );
+  }
+
+  const flaggedByUuid = new Map();
+
+  for (const f of alreadyFlagged || []) {
+    const uuid = normalizeKey(
+      f.servicem8_material_uuid
+    );
+
+    if (uuid) {
+      flaggedByUuid.set(
+        uuid,
+        f.reason
+      );
+    }
+  }
+
+  // ------------------------------------------------------------
+  // BUILD MATERIAL PAYLOAD
+  // ------------------------------------------------------------
+
   let materialsDeducted = 0;
   let materialsFlagged = 0;
   let materialsSkippedNoJob = 0;
   let materialsSkippedNoQty = 0;
-  let materialsSkippedBundleHeader = 0;
   let materialsSkippedNonInventory = 0;
-  let materialsSkippedDuplicate = 0;
-  const totalMaterialsSeen = (sm8Materials || []).length;
-  const matchMethodCounts = {};
+  let materialsSkippedAlreadyProcessed = 0;
+  let materialsCatalogResolved = 0;
+  let materialsCatalogMissing = 0;
 
-  const candidateMaterials = (sm8Materials || []).filter((m) => {
-    if (!m.uuid) { materialsSkippedNoJob++; return false; } // malformed line from the API, essentially never happens
-    if (decidedUuids.has(m.uuid)) { materialsSkippedDuplicate++; return false; } // human already resolved/ignored this one for good
-    if (isBundleHeader(m, bundleHeaderUuids)) { materialsSkippedBundleHeader++; return false; }
-    if (isNonInventoryCharge(m.name)) { materialsSkippedNonInventory++; return false; }
-    return true;
-  });
+  const totalMaterialsSeen =
+    sm8Materials.length;
+
+  // ------------------------------------------------------------
+  // PROCESS EACH SERVICE M8 MATERIAL
+  // ------------------------------------------------------------
 
   const materialPayload = [];
-  for (const m of candidateMaterials) {
-    const jobId = jobIdByUuid[m.job_uuid];
-    if (!jobId) { materialsSkippedNoJob++; continue; } // material belongs to a job we didn't pull (quote/cancelled)
 
-    const qty = Number(m.quantity ?? m.qty ?? 0);
-    if (!qty) { materialsSkippedNoQty++; continue; }
+  for (const m of sm8Materials) {
+    const jobId =
+      jobIdByUuid[m.job_uuid];
 
-    const nameKey = normalize(m.name);
-    let match = null;
-    let method = null;
-
-    if (nameKey && partByAlias[nameKey]) {
-      match = partByAlias[nameKey];
-      method = "alias";
+    if (!jobId) {
+      materialsSkippedNoJob++;
+      continue;
     }
 
-    if (!match) {
-      const catalogItem = catalogByUuid[m.material_uuid];
-      const catalogCode = normalize(catalogItem?.code || catalogItem?.item_number || catalogItem?.sku || catalogItem?.field1 || "");
-      if (catalogCode && partByKey[catalogCode]) {
-        match = partByKey[catalogCode];
-        method = "catalog_code";
-      }
+    const qty = Number(
+      m.quantity ??
+        m.qty ??
+        0
+    );
+
+    if (!qty) {
+      materialsSkippedNoQty++;
+      continue;
     }
 
-    if (!match && nameKey && partByKey[nameKey]) {
-      match = partByKey[nameKey];
-      method = "name";
+    // ----------------------------------------------------------
+    // RESOLVE THE REAL SERVICE M8 CATALOG ITEM
+    // ----------------------------------------------------------
+
+    const resolved =
+      resolveCatalogMaterial(
+        m,
+        catalogByUuid
+      );
+
+    const itemNumber =
+      resolved.itemNumber;
+
+    const catalogName =
+      resolved.catalogName;
+
+    const jobMaterialName =
+      resolved.jobMaterialName;
+
+    if (itemNumber) {
+      materialsCatalogResolved++;
+    } else {
+      materialsCatalogMissing++;
     }
 
-    if (!match) {
-      for (const token of extractCodeTokens(m.name)) {
-        const key = normalize(token);
-        if (partByKey[key]) { match = partByKey[key]; method = "embedded_code"; break; }
-      }
+    // Use catalog name first when available for labor detection.
+    const inventoryDisplayName =
+      catalogName ||
+      jobMaterialName ||
+      itemNumber;
+
+    // ----------------------------------------------------------
+    // LABOR / SERVICE CHARGE
+    // ----------------------------------------------------------
+
+    if (
+      isNonInventoryCharge(
+        inventoryDisplayName
+      ) ||
+      isNonInventoryCharge(
+        jobMaterialName
+      )
+    ) {
+      materialsSkippedNonInventory++;
+
+      console.log(
+        `[sm8 sync] skipping non-inventory charge: ${
+          inventoryDisplayName || "(unnamed)"
+        }`
+      );
+
+      continue;
     }
 
-    if (method) matchMethodCounts[method] = (matchMethodCounts[method] || 0) + 1;
+    // ----------------------------------------------------------
+    // MATCH SDR PART
+    // ----------------------------------------------------------
+    //
+    // PRIMARY:
+    // ServiceM8 catalog item_number
+    //
+    // FALLBACK:
+    // ServiceM8 job material name
+    //
+    // This means:
+    //
+    // TYWRAP8MOUNTBLK
+    //       ↓
+    // ServiceM8 item_number
+    //       ↓
+    // SDR SKU / part_no
+    //
+    // ----------------------------------------------------------
+
+    const itemKey =
+      normalizeKey(itemNumber);
+
+    const nameKey =
+      normalizeKey(jobMaterialName);
+
+    const match =
+      (itemKey
+        ? partByKey[itemKey]
+        : null) ||
+      (nameKey
+        ? partByKey[nameKey]
+        : null);
+
+    const materialUuid =
+      m.uuid ||
+      m.material_uuid ||
+      "";
+
+    const materialUuidKey =
+      normalizeKey(materialUuid);
+
+    // ----------------------------------------------------------
+    // ALREADY PROCESSED
+    // ----------------------------------------------------------
+
+    if (
+      materialUuidKey &&
+      syncedUuids.has(materialUuidKey)
+    ) {
+      materialsSkippedAlreadyProcessed++;
+      continue;
+    }
+
+    // ----------------------------------------------------------
+    // ALREADY FLAGGED WITHOUT A MATCH
+    // ----------------------------------------------------------
+    //
+    // If there is still no SDR match, don't keep inserting the
+    // exact same unmatched material on every sync.
+    //
+    // If there IS now a match, however, we allow it through again.
+    // This lets a previously unresolved material become inventory
+    // automatically after the catalog/part is corrected.
+    // ----------------------------------------------------------
+
+    if (
+      !match &&
+      materialUuidKey &&
+      flaggedByUuid.has(materialUuidKey)
+    ) {
+      continue;
+    }
+
+    // ----------------------------------------------------------
+    // BUILD PAYLOAD
+    // ----------------------------------------------------------
 
     materialPayload.push({
       job_id: jobId,
-      part_id: match ? match.id : null,
-      servicem8_material_uuid: m.uuid,
-      raw_name: m.name || "(unnamed)",
+
+      // This is the actual SDR part matched from:
+      // ServiceM8 material.item_number -> SDR SKU/part_no
+      part_id: match
+        ? match.id
+        : null,
+
+      // Keep the ServiceM8 job-material UUID.
+      servicem8_material_uuid:
+        materialUuid,
+
+      // IMPORTANT:
+      // Show the actual catalog item number whenever available.
+      // This makes TYWRAP8MOUNTBLK the actual issued material
+      // instead of only the human-readable ServiceM8 name.
+      raw_name:
+        itemNumber ||
+        jobMaterialName ||
+        "(unnamed)",
+
       qty,
-      unit_cost: Number(m.cost) || (match ? match.unit_cost : 0) || 0,
-      sale_cost: Number(m.price) || 0,
+
+      unit_cost:
+        Number(
+          m.cost ??
+            resolved.catalogItem?.cost ??
+            0
+        ) ||
+        (match
+          ? Number(match.unit_cost || 0)
+          : 0),
+
+      sale_cost:
+        Number(
+          m.price ??
+            resolved.catalogItem?.price ??
+            0
+        ) || 0,
     });
+
+    console.log(
+      `[sm8 sync] material candidate: job=${jobId} uuid=${materialUuid} item_number=${itemNumber || "(none)"} name=${jobMaterialName || "(none)"} matched_part=${match?.part_no || match?.sku || "(NO MATCH)"} qty=${qty}`
+    );
   }
 
+  // ------------------------------------------------------------
+  // PROCESS MATERIALS
+  // ------------------------------------------------------------
+
   if (materialPayload.length > 0) {
-    const { data: result, error: processErr } = await admin
-      .rpc("process_synced_materials", {
-        p_org_id: profile.org_id,
-        p_location_id: mainLoc.id,
-        p_materials: materialPayload,
-      })
+    const {
+      data: result,
+      error: processErr,
+    } = await admin
+      .rpc(
+        "process_synced_materials",
+        {
+          p_org_id: orgId,
+          p_location_id:
+            mainLoc.id,
+          p_materials:
+            materialPayload,
+        }
+      )
       .single();
+
     if (processErr) {
-      return NextResponse.json({ error: `Material processing failed: ${processErr.message}` }, { status: 500 });
+      console.error(
+        `[sm8 sync] material processing failed for jobs ${batchStart + 1}-${batchEnd}:`,
+        processErr
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            `Material processing failed: ${processErr.message}`,
+          syncComplete: false,
+          retryable: true,
+          checkpoint: {
+            nextIndex: batchStart,
+            totalJobs:
+              allJobUuids.length,
+            jobsAttempted:
+              batchJobUuids.length,
+          },
+          message:
+            "The checkpoint was not advanced because material processing failed.",
+        },
+        { status: 500 }
+      );
     }
-    materialsDeducted = result?.deducted_count || 0;
-    materialsFlagged = result?.flagged_count || 0;
+
+    materialsDeducted =
+      Number(
+        result?.deducted_count || 0
+      );
+
+    materialsFlagged =
+      Number(
+        result?.flagged_count || 0
+      );
   }
 
   console.log(
-    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged) â€” ` +
-    `matched by: ${JSON.stringify(matchMethodCounts)} â€” skipped: ${materialsSkippedBundleHeader} bundle header(s), ${materialsSkippedNonInventory} non-inventory â€” ${elapsed()}`
+    `[sm8 sync] processed ${materialPayload.length} material lines (${materialsDeducted} deducted, ${materialsFlagged} flagged, ${materialsSkippedNonInventory} non-inventory charges skipped) — ${elapsed()}`
   );
 
-  await admin.from("integrations").update({ last_synced_at: new Date().toISOString() }).eq("id", integration.id);
+  // ------------------------------------------------------------
+  // ADVANCE CHECKPOINT
+  // ------------------------------------------------------------
+
+  const syncComplete =
+    batchEnd >=
+    allJobUuids.length;
+
+  const newNextIndex =
+    syncComplete
+      ? allJobUuids.length
+      : batchEnd;
+
+  const {
+    error: checkpointUpdateErr,
+  } = await admin
+    .from("servicem8_sync_state")
+    .upsert({
+      org_id: orgId,
+      job_uuids:
+        allJobUuids,
+      next_index:
+        newNextIndex,
+      sync_started_at:
+        syncState?.sync_started_at ||
+        new Date().toISOString(),
+      updated_at:
+        new Date().toISOString(),
+    });
+
+  if (checkpointUpdateErr) {
+    console.error(
+      "[sm8 sync] WARNING: checkpoint update failed:",
+      checkpointUpdateErr
+    );
+
+    return NextResponse.json(
+      {
+        ok: true,
+        syncComplete: false,
+        warning:
+          "Materials were processed, but the sync checkpoint could not be saved. Existing material UUID protection will prevent duplicate processing.",
+        jobsCreated,
+        jobsUpdated,
+        materialsDeducted,
+        materialsFlagged,
+        checkpoint: {
+          nextIndex: batchStart,
+          totalJobs:
+            allJobUuids.length,
+          jobsProcessedThisRun:
+            batchJobUuids.length,
+        },
+      },
+      { status: 200 }
+    );
+  }
+
+  // ------------------------------------------------------------
+  // UPDATE LAST SYNC TIME
+  // ------------------------------------------------------------
+
+  await admin
+    .from("integrations")
+    .update({
+      last_synced_at:
+        new Date().toISOString(),
+    })
+    .eq("id", integration.id);
+
+  // ------------------------------------------------------------
+  // ACTIVITY LOG
+  // ------------------------------------------------------------
+
   await admin.from("activity_log").insert({
-    org_id: profile.org_id,
-    user_id: userData.user.id,
-    message: `Synced ServiceM8: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review.`,
+    org_id: orgId,
+    user_id:
+      userData.user.id,
+    message: syncComplete
+      ? `Completed ServiceM8 material sync: ${jobsCreated} new job(s), ${jobsUpdated} updated, ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`
+      : `ServiceM8 sync progress: processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}; ${materialsDeducted} material(s) deducted, ${materialsFlagged} flagged for review, ${materialsSkippedNonInventory} non-inventory charge(s) skipped.`,
   });
+
+  // ------------------------------------------------------------
+  // RESPONSE
+  // ------------------------------------------------------------
 
   return NextResponse.json({
     ok: true,
+    syncComplete,
+
     jobsCreated,
     jobsUpdated,
+
     materialsDeducted,
     materialsFlagged,
+
+    checkpoint: {
+      processedFrom:
+        batchStart + 1,
+      processedTo:
+        batchEnd,
+      nextIndex:
+        newNextIndex,
+      totalJobs:
+        allJobUuids.length,
+      remainingJobs: Math.max(
+        0,
+        allJobUuids.length -
+          newNextIndex
+      ),
+    },
+
+    message: syncComplete
+      ? "ServiceM8 sync complete."
+      : `Processed jobs ${batchStart + 1}-${batchEnd} of ${allJobUuids.length}. Click Sync again to continue.`,
+
     diagnostics: {
       totalMaterialsSeen,
+
       materialsSkippedNoJob,
       materialsSkippedNoQty,
-      materialsSkippedBundleHeader,
       materialsSkippedNonInventory,
-      materialsSkippedDuplicate,
-      matchMethodCounts,
-      catalogAvailable,
-      // Small sample for the debug panel â€” not full raw dumps, just enough
-      // to eyeball what ServiceM8 actually sent if matching looks off.
-      sampleRawMaterials: (sm8Materials || []).slice(0, 5),
+      materialsSkippedAlreadyProcessed,
+
+      materialsCatalogResolved,
+      materialsCatalogMissing,
+
+      materialPayloadCount:
+        materialPayload.length,
+
+      serviceM8CatalogCount:
+        sm8Catalog?.length ?? 0,
+
+      batchSize:
+        JOB_BATCH_SIZE,
+
+      elapsed: elapsed(),
+
+      sampleRawMaterials:
+        sm8Materials.slice(0, 5),
     },
   });
 }
