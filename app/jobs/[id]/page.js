@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter, useParams } from "next/navigation";
 import {
   ArrowLeft,
@@ -11,8 +11,10 @@ import {
   Truck,
   RotateCcw,
   History,
-  Check,
   Send,
+  Check,
+  Search,
+  X,
 } from "lucide-react";
 
 import { supabase } from "@/lib/supabase";
@@ -28,7 +30,6 @@ import {
   ModalShell,
   inputCls,
   IconBtn,
-  PartPicker,
 } from "@/components/ui";
 
 const fmtDate = (d) =>
@@ -45,31 +46,11 @@ const STATUS_STYLES = {
 };
 
 const TABS = [
-  {
-    key: "planned",
-    label: "Planned Materials",
-    icon: Package,
-  },
-  {
-    key: "issued",
-    label: "Issued Materials",
-    icon: FileText,
-  },
-  {
-    key: "purchases",
-    label: "Purchases",
-    icon: Truck,
-  },
-  {
-    key: "returned",
-    label: "Returned Materials",
-    icon: RotateCcw,
-  },
-  {
-    key: "history",
-    label: "Job History",
-    icon: History,
-  },
+  { key: "planned", label: "Planned Materials", icon: Package },
+  { key: "issued", label: "Issued Materials", icon: FileText },
+  { key: "purchases", label: "Purchases", icon: Truck },
+  { key: "returned", label: "Returned Materials", icon: RotateCcw },
+  { key: "history", label: "Job History", icon: History },
 ];
 
 export default function JobDetailPage() {
@@ -79,15 +60,12 @@ export default function JobDetailPage() {
 
   const [orgId, setOrgId] = useState(null);
   const [user, setUser] = useState(null);
-
   const [job, setJob] = useState(null);
   const [purchases, setPurchases] = useState([]);
   const [issuedMaterials, setIssuedMaterials] = useState([]);
   const [parts, setParts] = useState([]);
-
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const [tab, setTab] = useState("planned");
   const [issueModalOpen, setIssueModalOpen] = useState(false);
 
@@ -116,7 +94,6 @@ export default function JobDetailPage() {
 
   useEffect(() => {
     if (!orgId || !jobId) return;
-
     fetchJob();
   }, [orgId, jobId]);
 
@@ -133,7 +110,7 @@ export default function JobDetailPage() {
       supabase
         .from("jobs")
         .select(
-          "*, job_line_items(*, parts(part_no, sku, description)), locations(name, type)"
+          "*, job_line_items(*, parts(id, part_no, sku, description)), locations(name, type)"
         )
         .eq("id", jobId)
         .eq("org_id", orgId)
@@ -146,43 +123,24 @@ export default function JobDetailPage() {
         .eq("org_id", orgId)
         .order("po_date", { ascending: false }),
 
-      /*
-       * IMPORTANT:
-       *
-       * job_issued_materials uses issued_at.
-       * It does NOT use created_at.
-       */
       supabase
         .from("job_issued_materials")
-        .select(
-          "id, org_id, job_id, part_id, qty, unit_cost, issued_by, issued_at, notes, servicem8_material_uuid, parts(part_no, sku, description)"
-        )
+        .select("*, parts(id, part_no, sku, description)")
         .eq("job_id", jobId)
         .eq("org_id", orgId)
-        .order("issued_at", { ascending: false }),
+        .order("created_at", { ascending: false }),
 
       supabase
         .from("parts")
-        .select("id, part_no, sku, unit_cost")
+        .select("id, part_no, sku, description, unit_cost")
         .eq("org_id", orgId)
         .order("part_no"),
     ]);
 
-    if (jobErr) {
-      setError(jobErr.message);
-    }
-
-    if (poErr) {
-      setError((prev) => prev || poErr.message);
-    }
-
-    if (issuedErr) {
-      setError((prev) => prev || issuedErr.message);
-    }
-
-    if (partsErr) {
-      setError((prev) => prev || partsErr.message);
-    }
+    if (jobErr) setError(jobErr.message);
+    if (poErr) setError((prev) => prev || poErr.message);
+    if (issuedErr) setError((prev) => prev || issuedErr.message);
+    if (partsErr) setError((prev) => prev || partsErr.message);
 
     setJob(jobData || null);
     setPurchases(poData || []);
@@ -201,12 +159,6 @@ export default function JobDetailPage() {
       message,
     });
   };
-
-  /*
-   * =========================================================
-   * PURCHASES
-   * =========================================================
-   */
 
   const purchaseRows = purchases.flatMap((po) =>
     (po.po_line_items || []).map((li) => ({
@@ -236,52 +188,39 @@ export default function JobDetailPage() {
   const plannedTotal = (job.job_line_items || []).reduce(
     (s, li) =>
       s +
-      Number(li.qty || 0) *
-        Number(li.part_cost || 0),
+      Number(li.qty || 0) * Number(li.part_cost || 0),
     0
   );
 
   const plannedSaleTotal = (job.job_line_items || []).reduce(
     (s, li) =>
       s +
-      Number(li.qty || 0) *
-        Number(li.sale_cost || 0),
+      Number(li.qty || 0) * Number(li.sale_cost || 0),
     0
   );
 
-  /*
-   * =========================================================
-   * ISSUED QUANTITY
-   * =========================================================
-   *
-   * BOTH manual and ServiceM8 materials are now recorded in
-   * job_issued_materials.
-   *
-   * Therefore this is the single source of truth for actual
-   * issued quantity.
-   */
-
-  const issuedQtyByPart = {};
+  const manuallyIssuedQtyByPart = {};
 
   for (const im of issuedMaterials) {
-    issuedQtyByPart[im.part_id] =
-      (issuedQtyByPart[im.part_id] || 0) +
+    manuallyIssuedQtyByPart[im.part_id] =
+      (manuallyIssuedQtyByPart[im.part_id] || 0) +
       Number(im.qty || 0);
   }
 
+  const issuedQtyByPart = manuallyIssuedQtyByPart;
+
   const plannedLineIssuedQty = (li) =>
-    issuedQtyByPart[li.part_id] || 0;
+    li.servicem8_material_uuid
+      ? Number(li.qty || 0)
+      : manuallyIssuedQtyByPart[li.part_id] || 0;
 
   return (
     <Nav title="Job Detail">
       <div className="p-4 md:p-6">
 
-        {/* ================= HEADER ================= */}
-
+        {/* HEADER */}
         <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-
           <div className="flex items-center gap-3">
-
             <button
               onClick={() => router.push("/jobs")}
               className="p-2 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
@@ -298,20 +237,17 @@ export default function JobDetailPage() {
                 Open
               </Badge>
             </div>
-
           </div>
 
           {job.locations && (
             <button
               onClick={() => setIssueModalOpen(true)}
               className="px-3.5 py-2 text-sm rounded bg-orange-500 text-white hover:bg-orange-400 flex items-center gap-1.5"
-              title="Issue additional materials that were not automatically issued through ServiceM8."
             >
               <Send size={14} />
               Issue Extra Materials
             </button>
           )}
-
         </div>
 
         {error && (
@@ -320,12 +256,10 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        {/* ================= INFO CARDS ================= */}
-
+        {/* INFO CARDS */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
 
           <Panel title="Customer & Property" icon={User}>
-
             <div className="text-xs text-slate-500">
               Customer
             </div>
@@ -341,11 +275,9 @@ export default function JobDetailPage() {
             <div className="text-sm text-slate-100">
               {job.address || "NA"}
             </div>
-
           </Panel>
 
           <Panel title="Job Information" icon={FileText}>
-
             <div className="grid grid-cols-2 gap-2">
 
               <div>
@@ -369,11 +301,9 @@ export default function JobDetailPage() {
               </div>
 
             </div>
-
           </Panel>
 
           <Panel title="Cost Breakdown" icon={DollarSign}>
-
             <div className="grid grid-cols-2 gap-2">
 
               <div>
@@ -401,15 +331,12 @@ export default function JobDetailPage() {
             <div className="text-[10px] text-slate-600 mt-2">
               Estimated / Service Cost not tracked yet.
             </div>
-
           </Panel>
 
         </div>
 
-        {/* ================= TABS ================= */}
-
+        {/* TABS */}
         <div className="flex gap-4 border-b border-slate-800 mb-4 text-sm overflow-x-auto">
-
           {TABS.map((t) => (
             <button
               key={t.key}
@@ -424,26 +351,18 @@ export default function JobDetailPage() {
               {t.label}
             </button>
           ))}
-
         </div>
 
-        {/* ================= PLANNED MATERIALS ================= */}
-
+        {/* PLANNED */}
         {tab === "planned" && (
           <Panel title="Planned Materials" icon={Package}>
-
             {(job.job_line_items || []).length === 0 ? (
-
               <div className="text-sm text-slate-500 p-2">
                 No materials planned for this job.
               </div>
-
             ) : (
-
               <div className="overflow-x-auto">
-
                 <table className="w-full min-w-[760px]">
-
                   <thead>
                     <tr>
                       <Th>Product</Th>
@@ -456,14 +375,11 @@ export default function JobDetailPage() {
                   </thead>
 
                   <tbody>
-
                     {job.job_line_items.map((li) => (
-
                       <tr
                         key={li.id}
                         className="border-t border-slate-800/70"
                       >
-
                         <Td>
                           {li.parts?.part_no || "—"}
                         </Td>
@@ -481,166 +397,149 @@ export default function JobDetailPage() {
                         </Td>
 
                         <Td>
-
                           {li.servicem8_material_uuid ? (
-
                             <span className="text-[10px] f-mono uppercase text-sky-400 border border-sky-400/30 rounded px-1.5 py-0.5">
                               ServiceM8 Sync
                             </span>
-
                           ) : (
-
                             <span className="text-[10px] f-mono uppercase text-slate-500 border border-slate-700 rounded px-1.5 py-0.5">
                               Manual
                             </span>
-
                           )}
-
                         </Td>
 
                         <Td className="text-right f-mono text-emerald-400">
                           {plannedLineIssuedQty(li)}
                         </Td>
-
                       </tr>
-
                     ))}
-
                   </tbody>
-
                 </table>
-
               </div>
-
             )}
-
           </Panel>
         )}
 
-        {/* ================= ISSUED MATERIALS ================= */}
+        {/* ISSUED */}
+        {tab === "issued" &&
+          (() => {
+            const syncedRows = (job.job_line_items || [])
+              .filter((li) => li.servicem8_material_uuid)
+              .map((li) => ({
+                id: `sync-${li.id}`,
+                part_no: li.parts?.part_no,
+                sku: li.parts?.sku,
+                qty: li.qty,
+                unit_cost: li.part_cost,
+                when: null,
+                source: "sync",
+              }));
 
-        {tab === "issued" && (
+            const manualRows = issuedMaterials.map((im) => ({
+              id: `manual-${im.id}`,
+              part_no: im.parts?.part_no,
+              sku: im.parts?.sku,
+              qty: im.qty,
+              unit_cost: im.unit_cost,
+              when: im.created_at,
+              source: "manual",
+            }));
 
-          <Panel title="Issued Materials" icon={FileText}>
+            const allIssued = [
+              ...syncedRows,
+              ...manualRows,
+            ];
 
-            {issuedMaterials.length === 0 ? (
+            return (
+              <Panel title="Issued Materials" icon={FileText}>
+                {allIssued.length === 0 ? (
+                  <div className="text-sm text-slate-500 p-2">
+                    Nothing issued to this job yet.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[700px]">
+                      <thead>
+                        <tr>
+                          <Th>Product</Th>
+                          <Th>Code/SKU</Th>
+                          <Th className="text-right">Qty</Th>
+                          <Th className="text-right">
+                            Unit Cost
+                          </Th>
+                          <Th className="text-right">
+                            Total
+                          </Th>
+                          <Th>Source</Th>
+                          <Th>Issued</Th>
+                        </tr>
+                      </thead>
 
-              <div className="text-sm text-slate-500 p-2">
-                Nothing has been issued to this job yet.
-              </div>
+                      <tbody>
+                        {allIssued.map((row) => (
+                          <tr
+                            key={row.id}
+                            className="border-t border-slate-800/70"
+                          >
+                            <Td>{row.part_no || "—"}</Td>
 
-            ) : (
+                            <Td className="f-mono text-xs text-slate-400">
+                              {row.sku || "—"}
+                            </Td>
 
-              <div className="overflow-x-auto">
+                            <Td className="text-right f-mono text-emerald-400">
+                              {row.qty}
+                            </Td>
 
-                <table className="w-full min-w-[800px]">
+                            <Td className="text-right f-mono">
+                              {money(row.unit_cost)}
+                            </Td>
 
-                  <thead>
+                            <Td className="text-right f-mono">
+                              {money(
+                                Number(row.qty) *
+                                  Number(row.unit_cost)
+                              )}
+                            </Td>
 
-                    <tr>
-                      <Th>Product</Th>
-                      <Th>Code/SKU</Th>
-                      <Th className="text-right">Qty</Th>
-                      <Th className="text-right">Unit Cost</Th>
-                      <Th className="text-right">Total</Th>
-                      <Th>Source</Th>
-                      <Th>Issued</Th>
-                    </tr>
+                            <Td>
+                              {row.source === "sync" ? (
+                                <span className="text-[10px] f-mono uppercase text-sky-400 border border-sky-400/30 rounded px-1.5 py-0.5">
+                                  ServiceM8 Sync
+                                </span>
+                              ) : (
+                                <span className="text-[10px] f-mono uppercase text-slate-500 border border-slate-700 rounded px-1.5 py-0.5">
+                                  Manual
+                                </span>
+                              )}
+                            </Td>
 
-                  </thead>
+                            <Td className="text-slate-400 text-xs">
+                              {row.when
+                                ? fmtDateTime(row.when)
+                                : "—"}
+                            </Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Panel>
+            );
+          })()}
 
-                  <tbody>
-
-                    {issuedMaterials.map((row) => (
-
-                      <tr
-                        key={row.id}
-                        className="border-t border-slate-800/70"
-                      >
-
-                        <Td>
-                          {row.parts?.part_no || "—"}
-                        </Td>
-
-                        <Td className="f-mono text-xs text-slate-400">
-                          {row.parts?.sku || "—"}
-                        </Td>
-
-                        <Td className="text-right f-mono text-emerald-400">
-                          {row.qty}
-                        </Td>
-
-                        <Td className="text-right f-mono">
-                          {money(row.unit_cost)}
-                        </Td>
-
-                        <Td className="text-right f-mono">
-                          {money(
-                            Number(row.qty || 0) *
-                            Number(row.unit_cost || 0)
-                          )}
-                        </Td>
-
-                        <Td>
-
-                          {row.servicem8_material_uuid ? (
-
-                            <span className="text-[10px] f-mono uppercase text-sky-400 border border-sky-400/30 rounded px-1.5 py-0.5">
-                              ServiceM8 Sync
-                            </span>
-
-                          ) : (
-
-                            <span className="text-[10px] f-mono uppercase text-slate-500 border border-slate-700 rounded px-1.5 py-0.5">
-                              Manual
-                            </span>
-
-                          )}
-
-                        </Td>
-
-                        <Td className="text-slate-400 text-xs">
-                          {row.issued_at
-                            ? fmtDateTime(row.issued_at)
-                            : "—"}
-                        </Td>
-
-                      </tr>
-
-                    ))}
-
-                  </tbody>
-
-                </table>
-
-              </div>
-
-            )}
-
-          </Panel>
-
-        )}
-
-        {/* ================= PURCHASES ================= */}
-
+        {/* PURCHASES */}
         {tab === "purchases" && (
-
           <Panel title="Purchases" icon={Truck}>
-
             {purchaseRows.length === 0 ? (
-
               <div className="text-sm text-slate-500 p-2">
                 No purchase orders linked to this job yet.
               </div>
-
             ) : (
-
               <div className="overflow-x-auto">
-
                 <table className="w-full min-w-[800px]">
-
                   <thead>
-
                     <tr>
                       <Th>PO No.</Th>
                       <Th>Date</Th>
@@ -652,18 +551,14 @@ export default function JobDetailPage() {
                       <Th className="text-right">Received</Th>
                       <Th>Status</Th>
                     </tr>
-
                   </thead>
 
                   <tbody>
-
                     {purchaseRows.map((row, i) => (
-
                       <tr
                         key={`${row.po_id}-${i}`}
                         className="border-t border-slate-800/70"
                       >
-
                         <Td className="f-mono text-orange-400">
                           {row.po_no}
                         </Td>
@@ -672,13 +567,9 @@ export default function JobDetailPage() {
                           {fmtDate(row.po_date)}
                         </Td>
 
-                        <Td>
-                          {row.vendor}
-                        </Td>
+                        <Td>{row.vendor}</Td>
 
-                        <Td>
-                          {row.part_no}
-                        </Td>
+                        <Td>{row.part_no}</Td>
 
                         <Td className="f-mono text-xs text-slate-400">
                           {row.sku}
@@ -706,63 +597,37 @@ export default function JobDetailPage() {
                             {row.status}
                           </Badge>
                         </Td>
-
                       </tr>
-
                     ))}
-
                   </tbody>
-
                 </table>
-
               </div>
-
             )}
-
           </Panel>
-
         )}
 
-        {/* ================= RETURNED MATERIALS ================= */}
-
+        {/* RETURNED */}
         {tab === "returned" && (
-
-          <Panel
-            title="Returned Materials"
-            icon={RotateCcw}
-          >
-
+          <Panel title="Returned Materials" icon={RotateCcw}>
             <div className="text-sm text-slate-500 p-2">
-              Not built yet — this will track materials returned from this job back to stock, in a future session.
+              Not built yet — this will track materials returned
+              from this job back to stock.
             </div>
-
           </Panel>
-
         )}
 
-        {/* ================= JOB HISTORY ================= */}
-
+        {/* HISTORY */}
         {tab === "history" && (
-
-          <Panel
-            title="Job History"
-            icon={History}
-          >
-
+          <Panel title="Job History" icon={History}>
             <div className="text-sm text-slate-500 p-2">
-              Not built yet — this will show a timeline of changes to this job, in a future session.
+              Not built yet — this will show a timeline of
+              changes to this job.
             </div>
-
           </Panel>
-
         )}
-
       </div>
 
-      {/* ================= ISSUE MODAL ================= */}
-
       {issueModalOpen && (
-
         <IssueMaterialsModal
           job={job}
           parts={parts}
@@ -774,26 +639,17 @@ export default function JobDetailPage() {
           }}
           logActivity={logActivity}
         />
-
       )}
-
     </Nav>
   );
 }
 
+
 /*
- * =============================================================
- * ISSUE MATERIALS MODAL
- * =============================================================
- *
- * Manual issuing is ONLY for:
- *
- * 1. Planned materials that did not come through ServiceM8
- * 2. Additional materials not originally planned
- *
- * ServiceM8 materials are already handled automatically by
- * process_synced_materials.
- */
+=============================================================
+ISSUE MATERIALS MODAL
+=============================================================
+*/
 
 function IssueMaterialsModal({
   job,
@@ -803,14 +659,6 @@ function IssueMaterialsModal({
   onIssued,
   logActivity,
 }) {
-
-  /*
-   * Only manual/planned lines are shown here.
-   *
-   * ServiceM8 lines are automatically issued by
-   * process_synced_materials.
-   */
-
   const plannedRows = (job.job_line_items || [])
     .filter((li) => !li.servicem8_material_uuid)
     .map((li) => ({
@@ -823,7 +671,7 @@ function IssueMaterialsModal({
           (issuedQtyByPart[li.part_id] || 0),
         0
       ),
-      unit_cost: li.part_cost,
+      unit_cost: Number(li.part_cost || 0),
     }));
 
   const [source, setSource] = useState("planned");
@@ -838,11 +686,48 @@ function IssueMaterialsModal({
       }))
   );
 
+  const [catalogSearch, setCatalogSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
   const partById = (id) =>
     parts.find((p) => p.id === id);
+
+  /*
+   * =========================================================
+   * CATALOG SEARCH
+   * =========================================================
+   *
+   * Search against:
+   * - part number
+   * - SKU
+   * - description
+   *
+   * This completely bypasses the broken PartPicker.
+   */
+
+  const filteredCatalogParts = useMemo(() => {
+    const q = catalogSearch.trim().toLowerCase();
+
+    if (!q) {
+      return parts.slice(0, 30);
+    }
+
+    return parts
+      .filter((p) => {
+        const text = [
+          p.part_no,
+          p.sku,
+          p.description,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        return text.includes(q);
+      })
+      .slice(0, 30);
+  }, [parts, catalogSearch]);
 
   const updateQty = (partId, qty) => {
     setRows((current) =>
@@ -866,31 +751,39 @@ function IssueMaterialsModal({
   const addCatalogRow = (partId) => {
     if (!partId) return;
 
-    if (rows.some((r) => r.part_id === partId)) {
+    if (
+      rows.some(
+        (r) => r.part_id === partId
+      )
+    ) {
+      setCatalogSearch("");
       return;
     }
 
     const p = partById(partId);
+
+    if (!p) return;
 
     setRows((current) => [
       ...current,
       {
         part_id: partId,
         qty: 1,
-        unit_cost: p?.unit_cost || 0,
+        unit_cost: Number(p.unit_cost || 0),
       },
     ]);
+
+    setCatalogSearch("");
   };
 
   const submit = async () => {
-
     const items = rows
-      .filter((r) => Number(r.qty) > 0)
       .map((r) => ({
         part_id: r.part_id,
-        qty: Number(r.qty),
+        qty: Number(r.qty || 0),
         unit_cost: Number(r.unit_cost || 0),
-      }));
+      }))
+      .filter((r) => r.qty > 0);
 
     if (items.length === 0) {
       setError(
@@ -903,7 +796,6 @@ function IssueMaterialsModal({
     setError("");
 
     try {
-
       const { error: rpcErr } =
         await supabase.rpc(
           "issue_job_materials",
@@ -922,57 +814,43 @@ function IssueMaterialsModal({
       );
 
       onIssued();
-
     } catch (e) {
-
       setError(
         e?.message ||
-          "Could not issue materials — check that there's enough stock at this job's location."
+          "Could not issue materials — check that there is enough stock at this job's location."
       );
-
     } finally {
-
       setSaving(false);
-
     }
   };
 
   return (
-
     <ModalShell
       title={`Issue Extra Materials — #${job.job_no}`}
       icon={Send}
       onClose={onClose}
       wide
     >
-
       <div className="text-xs text-slate-500 mb-3">
-
-        For materials that were not automatically issued through
-        ServiceM8.
-
-        This deducts real inventory at{" "}
-
+        For materials that were not automatically issued
+        through ServiceM8. This deducts real inventory at{" "}
         <span className="text-slate-300">
           {job.locations?.name ||
             "this job's location"}
         </span>
-
-        {" "}and records the issue against this job.
-
+        .
       </div>
 
       {error && (
-
         <div className="text-sm text-red-400 mb-3 border border-red-900/50 bg-red-950/20 rounded px-3 py-2">
           {error}
         </div>
-
       )}
 
+      {/* SOURCE TABS */}
       <div className="flex gap-4 border-b border-slate-800 mb-3 text-sm">
-
         <button
+          type="button"
           onClick={() => setSource("planned")}
           className={`pb-2 px-1 ${
             source === "planned"
@@ -984,6 +862,7 @@ function IssueMaterialsModal({
         </button>
 
         <button
+          type="button"
           onClick={() => setSource("catalog")}
           className={`pb-2 px-1 ${
             source === "catalog"
@@ -993,80 +872,151 @@ function IssueMaterialsModal({
         >
           Add Other Product
         </button>
-
       </div>
 
+      {/* =====================================================
+          CATALOG SEARCH
+      ===================================================== */}
+
       {source === "catalog" && (
+        <div className="mb-4">
 
-        <div className="mb-3">
+          <div className="relative">
+            <Search
+              size={15}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500"
+            />
 
-          <PartPicker
-            parts={parts}
-            value=""
-            onChange={addCatalogRow}
-            placeholder="Search to add a product..."
-          />
+            <input
+              className={`${inputCls} pl-9 pr-9`}
+              value={catalogSearch}
+              onChange={(e) =>
+                setCatalogSearch(e.target.value)
+              }
+              placeholder="Search part number, SKU, or description..."
+              autoComplete="off"
+            />
 
+            {catalogSearch && (
+              <button
+                type="button"
+                onClick={() =>
+                  setCatalogSearch("")
+                }
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          <div className="mt-2 border border-slate-800 rounded overflow-hidden bg-slate-950">
+
+            {filteredCatalogParts.length === 0 ? (
+              <div className="px-3 py-3 text-sm text-slate-500">
+                No matching parts.
+              </div>
+            ) : (
+              <div className="max-h-56 overflow-y-auto">
+                {filteredCatalogParts.map((p) => {
+                  const alreadyAdded =
+                    rows.some(
+                      (r) => r.part_id === p.id
+                    );
+
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      disabled={alreadyAdded}
+                      onClick={() =>
+                        addCatalogRow(p.id)
+                      }
+                      className={`w-full text-left px-3 py-2.5 border-b border-slate-800/70 last:border-0 ${
+                        alreadyAdded
+                          ? "opacity-40 cursor-not-allowed"
+                          : "hover:bg-slate-900"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+
+                        <div className="min-w-0">
+                          <div className="text-sm text-slate-100 truncate">
+                            {p.part_no || "—"}
+                          </div>
+
+                          <div className="text-xs text-slate-500 f-mono truncate">
+                            {p.sku || "NO SKU"}
+                            {p.description
+                              ? ` · ${p.description}`
+                              : ""}
+                          </div>
+                        </div>
+
+                        <div className="text-xs f-mono text-slate-400 shrink-0">
+                          {money(
+                            Number(
+                              p.unit_cost || 0
+                            )
+                          )}
+                        </div>
+
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
-
       )}
+
+      {/* =====================================================
+          MATERIAL ROWS
+      ===================================================== */}
 
       <div className="border border-slate-800 rounded">
 
         <div className="grid grid-cols-[2fr_0.8fr_1fr_auto] gap-2 px-3 py-2 border-b border-slate-800 text-[11px] f-mono uppercase text-slate-500">
-
           <span>Product</span>
-
           <span className="text-right">
             Qty to Issue
           </span>
-
           <span className="text-right">
             Unit Cost
           </span>
-
           <span></span>
-
         </div>
 
         {rows.length === 0 ? (
-
           <div className="p-4 text-sm text-slate-500">
-
             {source === "planned"
               ? "Everything planned has already been fully issued."
               : "No items added yet."}
-
           </div>
-
         ) : (
-
           rows.map((r) => {
-
             const part = partById(r.part_id);
 
             return (
-
               <div
                 key={r.part_id}
                 className="grid grid-cols-[2fr_0.8fr_1fr_auto] gap-2 px-3 py-2 items-center border-b border-slate-800/60 last:border-0"
               >
-
-                <div>
-
-                  <div className="text-sm text-slate-100">
+                <div className="min-w-0">
+                  <div className="text-sm text-slate-100 truncate">
                     {part?.part_no || "—"}
                   </div>
 
-                  <div className="text-xs f-mono text-slate-500">
-                    {part?.sku}
+                  <div className="text-xs f-mono text-slate-500 truncate">
+                    {part?.sku || "NO SKU"}
                   </div>
-
                 </div>
 
                 <input
                   type="number"
                   min="0"
+                  step="1"
                   className={inputCls}
                   value={r.qty}
                   onChange={(e) =>
@@ -1086,22 +1036,21 @@ function IssueMaterialsModal({
                   onClick={() =>
                     removeRow(r.part_id)
                   }
+                  title="Remove"
                 >
-                  <FileText size={13} />
+                  <X size={13} />
                 </IconBtn>
-
               </div>
-
             );
           })
-
         )}
-
       </div>
 
+      {/* FOOTER */}
       <div className="flex justify-end gap-2 mt-4">
 
         <button
+          type="button"
           onClick={onClose}
           className="px-3.5 py-2 text-sm rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
         >
@@ -1121,12 +1070,9 @@ function IssueMaterialsModal({
           {saving
             ? "Issuing..."
             : "Issue Materials"}
-
         </PrimaryBtn>
 
       </div>
-
     </ModalShell>
-
   );
 }
