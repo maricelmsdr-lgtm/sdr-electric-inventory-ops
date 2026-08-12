@@ -241,16 +241,17 @@ export function PartPicker({ orgId, value, onChange, placeholder = "Type part no
       const q = query.trim();
       let req = supabase
         .from("parts")
-        .select("id, part_no, sku, description")
+        .select("id, part_no, sku")
         .eq("org_id", orgId)
         .order("part_no")
         .limit(50);
 
       if (q) {
-        // Matches part_no, sku, or description containing the query.
-        req = req.or(
-          `part_no.ilike.%${q}%,sku.ilike.%${q}%,description.ilike.%${q}%`
-        );
+        // Matches part_no or sku containing the query. (No `description`
+        // column exists on parts — filtering on it caused every search to
+        // fail with a 400 from PostgREST, which silently showed as "No
+        // matching parts" in the UI instead of a visible error.)
+        req = req.or(`part_no.ilike.%${q}%,sku.ilike.%${q}%`);
       }
 
       const { data, error } = await req;
